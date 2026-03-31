@@ -14,6 +14,7 @@ from rich.tree import Tree
 
 if TYPE_CHECKING:
     from claude_memory.models import Memory, SearchResult, SessionSummary
+    from claude_memory.timeline import SessionTimeline
 
 console = Console()
 
@@ -194,6 +195,113 @@ def display_search_results(results: list[SearchResult], query: str) -> None:
 
     for r in results:
         display_memory(r.memory, score=r.score)
+
+
+# Timeline event type styling
+TIMELINE_EVENT_STYLES: dict[str, str] = {
+    "user_message": "bold yellow",
+    "tool_use": "bold white",
+    "file_write": "bold green",
+    "file_edit": "bold cyan",
+    "file_read": "dim white",
+    "bash_command": "bold magenta",
+    "decision": "bold blue",
+    "error": "bold red",
+    "fix": "bold green",
+}
+
+TIMELINE_EVENT_ICONS: dict[str, str] = {
+    "user_message": "\U0001f4ac",   # speech balloon
+    "tool_use": "\U0001f527",       # wrench
+    "file_write": "\U0001f4dd",     # memo
+    "file_edit": "\u270f\ufe0f",    # pencil
+    "file_read": "\U0001f4c4",      # document
+    "bash_command": "\U0001f4bb",   # laptop
+    "decision": "\U0001f9e0",       # brain
+    "error": "\u274c",              # cross mark
+    "fix": "\u2705",                # check mark
+}
+
+
+def display_timeline(
+    timeline: SessionTimeline,
+    limit: int = 50,
+    event_type: str | None = None,
+) -> None:
+    """Display a session timeline using rich.
+
+    Shows a header panel with session info, a table of events,
+    and a summary footer with statistics.
+    """
+    from claude_memory.utils import format_duration
+
+    # --- Header ---
+    header_lines: list[str] = []
+    header_lines.append(f"[bold]Session:[/bold] {timeline.session_id}")
+    if timeline.project_path:
+        header_lines.append(f"[bold]Project:[/bold] {timeline.project_path}")
+    if timeline.started_at:
+        header_lines.append(
+            f"[bold]Started:[/bold] {timeline.started_at.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    if timeline.duration_minutes is not None:
+        header_lines.append(
+            f"[bold]Duration:[/bold] {format_duration(timeline.duration_minutes)}"
+        )
+    header = "\n".join(header_lines)
+    console.print(Panel(header, title="Session Timeline", border_style="bright_blue"))
+
+    # --- Filter events ---
+    events = timeline.events
+    if event_type:
+        events = [e for e in events if e.event_type == event_type]
+    events = events[:limit]
+
+    if not events:
+        console.print("[dim]No events to display.[/dim]")
+        return
+
+    # --- Events table ---
+    table = Table(show_lines=False, pad_edge=True, expand=True)
+    table.add_column("Time", style="dim", width=12)
+    table.add_column("Type", width=16)
+    table.add_column("Description", min_width=30)
+    table.add_column("Files", style="cyan", max_width=30)
+
+    for event in events:
+        time_str = event.timestamp.strftime("%H:%M:%S") if event.timestamp else ""
+        style = TIMELINE_EVENT_STYLES.get(event.event_type, "white")
+        icon = TIMELINE_EVENT_ICONS.get(event.event_type, "\U0001f4cc")
+        type_text = Text(f"{icon} {event.event_type}", style=style)
+        files_str = ", ".join(Path(f).name for f in event.files) if event.files else ""
+        table.add_row(time_str, type_text, event.summary, files_str)
+
+    console.print(table)
+
+    # --- Summary footer ---
+    total = len(timeline.events)
+    shown = len(events)
+    summary_parts: list[str] = []
+    summary_parts.append(f"[bold]{total}[/bold] total events")
+    if shown < total:
+        summary_parts.append(f"([bold]{shown}[/bold] shown)")
+    summary_parts.append(
+        f"[yellow]{timeline.user_message_count}[/yellow] user messages"
+    )
+    summary_parts.append(
+        f"[magenta]{timeline.tool_use_count}[/magenta] tool uses"
+    )
+    if timeline.files_modified:
+        summary_parts.append(
+            f"[green]{len(timeline.files_modified)}[/green] files modified"
+        )
+    console.print(
+        Panel(
+            " | ".join(summary_parts),
+            title="Summary",
+            border_style="dim",
+        )
+    )
 
 
 def render_to_string(render_func, *args, **kwargs) -> str:

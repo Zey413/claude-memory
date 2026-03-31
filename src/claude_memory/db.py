@@ -22,6 +22,10 @@ _LOCKED_SLEEP = 0.1
 # ── Schema Migrations ────────────────────────────────────────────────────────
 
 MIGRATIONS: dict[int, list[str]] = {
+    3: [
+        "ALTER TABLE memories ADD COLUMN embedding BLOB",
+        "ALTER TABLE memories ADD COLUMN embedding_model TEXT",
+    ],
     2: [
         "ALTER TABLE memories ADD COLUMN importance_score REAL DEFAULT 0.0",
     ],
@@ -585,6 +589,63 @@ class MemoryDB:
         if row is None:
             return 0.0
         return row["importance_score"] or 0.0
+
+    # ── Embedding Storage ────────────────────────────────────────────────
+
+    def store_embedding(self, memory_id: str, embedding: bytes, model_id: str) -> None:
+        """Store a pre-serialised embedding BLOB for *memory_id*."""
+        self._execute(
+            "UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ?",
+            (embedding, model_id, memory_id),
+            commit=True,
+        )
+
+    def get_embedding(self, memory_id: str) -> bytes | None:
+        """Return the raw embedding bytes for *memory_id*, or ``None``."""
+        row = self._execute(
+            "SELECT embedding FROM memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["embedding"]  # may itself be None
+
+    def get_memories_with_embeddings(
+        self, project_path: str | None = None,
+    ) -> list[tuple[Memory, bytes]]:
+        """Return ``(Memory, embedding_bytes)`` pairs that have embeddings.
+
+        Optionally filtered by *project_path*.
+        """
+        if project_path:
+            rows = self._execute(
+                """SELECT * FROM memories
+                   WHERE project_path = ? AND embedding IS NOT NULL
+                   ORDER BY created_at DESC""",
+                (project_path,),
+            ).fetchall()
+        else:
+            rows = self._execute(
+                "SELECT * FROM memories WHERE embedding IS NOT NULL ORDER BY created_at DESC",
+            ).fetchall()
+        results: list[tuple[Memory, bytes]] = []
+        for row in rows:
+            mem = self._row_to_memory(row)
+            results.append((mem, row["embedding"]))
+        return results
+
+    def count_embedded(self, project_path: str | None = None) -> int:
+        """Count memories that already have an embedding vector."""
+        if project_path:
+            row = self._execute(
+                "SELECT COUNT(*) FROM memories WHERE project_path = ? AND embedding IS NOT NULL",
+                (project_path,),
+            ).fetchone()
+        else:
+            row = self._execute(
+                "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL",
+            ).fetchone()
+        return row[0] if row else 0
 
     # ── Stats ─────────────────────────────────────────────────────────────
 

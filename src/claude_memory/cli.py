@@ -23,9 +23,11 @@ from claude_memory.display import (
     display_search_results,
     display_sessions,
     display_stats,
+    display_timeline,
 )
 from claude_memory.extractor import MemoryExtractor
 from claude_memory.generator import ClaudemdGenerator
+from claude_memory.graph import GraphBuilder
 from claude_memory.hooks import HookManager
 from claude_memory.models import Memory, MemoryType
 from claude_memory.parser import parse_session_file
@@ -224,9 +226,14 @@ def _ingest_all_sessions(
 @click.option("--tag", multiple=True, help="Filter by tags")
 @click.option("--limit", "-n", default=20, help="Max results")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--semantic", is_flag=True,
+              help="Use semantic similarity search")
+@click.option("--hybrid", is_flag=True,
+              help="Combine FTS + semantic search")
 @click.pass_context
 def search(ctx: click.Context, query: str, project: str | None,
-           memory_type: str | None, tag: tuple, limit: int, as_json: bool) -> None:
+           memory_type: str | None, tag: tuple, limit: int, as_json: bool,
+           semantic: bool, hybrid: bool) -> None:
     """Search memories by keyword or topic.
 
     \b
@@ -234,6 +241,8 @@ def search(ctx: click.Context, query: str, project: str | None,
         claude-memory search "authentication"
         claude-memory search "database" --type decision
         claude-memory search "pytest" --tag testing
+        claude-memory search "API design" --semantic
+        claude-memory search "database patterns" --hybrid
     """
     db = _get_db(ctx)
     json_mode = as_json or _is_json_mode(ctx)
@@ -243,13 +252,26 @@ def search(ctx: click.Context, query: str, project: str | None,
         tags = list(tag) if tag else None
         project_path = _resolve_project(project) if project else None
 
-        results = searcher.search(
-            query=query,
-            project_path=project_path,
-            memory_type=mt,
-            tags=tags,
-            limit=limit,
-        )
+        if semantic:
+            results = searcher.semantic_search(
+                query=query,
+                project_path=project_path,
+                limit=limit,
+            )
+        elif hybrid:
+            results = searcher.hybrid_search(
+                query=query,
+                project_path=project_path,
+                limit=limit,
+            )
+        else:
+            results = searcher.search(
+                query=query,
+                project_path=project_path,
+                memory_type=mt,
+                tags=tags,
+                limit=limit,
+            )
 
         if json_mode:
             output = [
@@ -276,6 +298,83 @@ def search(ctx: click.Context, query: str, project: str | None,
         sys.exit(130)
     except Exception as exc:
         click.echo(f"Error during search: {exc}", err=True)
+        if ctx.obj.get("verbose"):
+            logger.exception("Full traceback:")
+        sys.exit(1)
+    finally:
+        db.close()
+
+
+# ── Embed ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--project", "-p", help="Filter by project path")
+@click.option("--force", is_flag=True, help="Re-embed all memories (even already embedded)")
+@click.pass_context
+def embed(ctx: click.Context, project: str | None, force: bool) -> None:
+    """Generate embeddings for all memories (requires embeddings extra).
+
+    \b
+    Examples:
+        claude-memory embed
+        claude-memory embed --project /path/to/project
+        claude-memory embed --force
+    """
+    try:
+        from claude_memory.embedding import _MODEL_ID, EmbeddingEngine, is_available
+    except ImportError:
+        click.echo(
+            "Error: Embedding dependencies not installed.\n"
+            "Install with: pip install 'claude-memory[embeddings]'",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not is_available():
+        click.echo(
+            "Error: sentence-transformers and/or numpy not installed.\n"
+            "Install with: pip install 'claude-memory[embeddings]'",
+            err=True,
+        )
+        sys.exit(1)
+
+    db = _get_db(ctx)
+    try:
+        project_path = _resolve_project(project) if project else None
+        all_memories = db.get_all_memories(project_path)
+
+        if not all_memories:
+            click.echo("No memories found to embed.")
+            return
+
+        # Determine which memories need embedding
+        if force:
+            to_embed = all_memories
+        else:
+            to_embed = [m for m in all_memories if db.get_embedding(m.id) is None]
+
+        if not to_embed:
+            total = db.count_embedded(project_path)
+            click.echo(f"All {total} memories already embedded. Use --force to re-embed.")
+            return
+
+        click.echo(f"Embedding {len(to_embed)} memories...")
+        engine = EmbeddingEngine.get_instance()
+
+        # Batch encode for efficiency
+        texts = [f"{m.title} {m.content}" for m in to_embed]
+        vectors = engine.encode_batch(texts)
+
+        for mem, vec in zip(to_embed, vectors):
+            blob = engine.serialize(vec)
+            db.store_embedding(mem.id, blob, _MODEL_ID)
+
+        click.echo(f"Done: {len(to_embed)} memories embedded with model '{_MODEL_ID}'.")
+    except KeyboardInterrupt:
+        click.echo("\nEmbedding interrupted.", err=True)
+        sys.exit(130)
+    except Exception as exc:
+        click.echo(f"Error during embedding: {exc}", err=True)
         if ctx.obj.get("verbose"):
             logger.exception("Full traceback:")
         sys.exit(1)
@@ -372,6 +471,65 @@ def sessions(ctx: click.Context, project: str | None, limit: int) -> None:
             display_sessions(session_list)
     finally:
         db.close()
+
+
+# ── Replay ───────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument('session_id', required=False)
+@click.option('--project', '-p', type=click.Path(exists=True),
+              help='Project path (default: current directory)')
+@click.option('--limit', default=50, help='Max events to show')
+@click.option('--type', 'event_type', default=None,
+              help='Filter by event type (user_message, tool_use, file_write, bash_command)')
+@click.pass_context
+def replay(ctx, session_id, project, limit, event_type):
+    """Replay a session timeline showing key events.
+
+    If no session_id is given, replays the most recent session.
+
+    \b
+    Examples:
+        claude-memory replay
+        claude-memory replay abc123-def456
+        claude-memory replay --project /path/to/project
+        claude-memory replay --type bash_command
+    """
+    from claude_memory.timeline import TimelineBuilder
+
+    project_path = _resolve_project(project)
+
+    try:
+        if session_id:
+            # Find the session file by ID (or prefix match)
+            files = find_session_files(project_path)
+            matching = [f for f in files if f.stem == session_id or f.stem.startswith(session_id)]
+            if not matching:
+                click.echo(f"Error: Session file not found for {session_id}", err=True)
+                sys.exit(1)
+            filepath = matching[0]
+        else:
+            # Use the latest session
+            try:
+                _sid, filepath = find_latest_session(project_path)
+            except FileNotFoundError as e:
+                click.echo(f"Error: {e}", err=True)
+                sys.exit(1)
+
+        builder = TimelineBuilder()
+        timeline = builder.build_from_jsonl(filepath)
+        timeline.project_path = project_path
+
+        display_timeline(timeline, limit=limit, event_type=event_type)
+
+    except KeyboardInterrupt:
+        click.echo("\nReplay interrupted.", err=True)
+        sys.exit(130)
+    except Exception as exc:
+        click.echo(f"Error during replay: {exc}", err=True)
+        if ctx.obj.get("verbose"):
+            logger.exception("Full traceback:")
+        sys.exit(1)
 
 
 # ── Generate ──────────────────────────────────────────────────────────────────
@@ -947,6 +1105,79 @@ def watch(ctx: click.Context, interval: float, project: str | None,
         click.echo(f"  Files processed:    {summary['files_processed']}")
         click.echo(f"  Memories extracted: {summary['memories_extracted']}")
         click.echo(f"  Errors:             {summary['errors']}")
+        db.close()
+
+
+# ── Graph ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option('--project', '-p', default=None, help='Filter by project path')
+@click.option('--format', 'fmt', type=click.Choice(['summary', 'dot', 'json']),
+              default='summary', help='Output format')
+@click.option('--output', '-o', type=click.Path(), default=None,
+              help='Output file path (default: stdout)')
+@click.pass_context
+def graph(ctx, project, fmt, output):
+    """Analyze cross-project memory relationships."""
+    db = _get_db(ctx)
+    try:
+        project_path = _resolve_project(project) if project else None
+        builder = GraphBuilder(db)
+        g = builder.build(project_path)
+
+        if fmt == 'dot':
+            content = builder.export_dot(g)
+        elif fmt == 'json':
+            content = builder.export_json(g)
+        else:
+            summary = builder.get_summary(g)
+            lines = [
+                "Knowledge Graph Summary",
+                "=" * 40,
+                f"  Nodes:                {summary['node_count']}",
+                f"  Edges:                {summary['edge_count']}",
+                f"  Clusters:             {summary['cluster_count']}",
+                f"  Projects:             {summary['project_count']}",
+                f"  Cross-project edges:  {summary['cross_project_edges']}",
+            ]
+            if summary['hub_memories']:
+                lines.append("\n  Hub memories:")
+                for h in summary['hub_memories']:
+                    lines.append(f"    - {h['title']} (degree: {h['degree']})")
+            content = "\n".join(lines)
+
+        if output:
+            Path(output).write_text(content, encoding='utf-8')
+            click.echo(f"Graph output written to {output}")
+        else:
+            click.echo(content)
+    finally:
+        db.close()
+
+
+@cli.command("shared-patterns")
+@click.option('--limit', default=10, help='Max patterns to show')
+@click.pass_context
+def shared_patterns(ctx, limit):
+    """Find patterns and decisions shared across projects."""
+    db = _get_db(ctx)
+    json_mode = _is_json_mode(ctx)
+    try:
+        builder = GraphBuilder(db)
+        patterns = builder.find_shared_patterns()[:limit]
+
+        if json_mode:
+            click.echo(json.dumps(patterns, indent=2, ensure_ascii=False))
+        else:
+            if not patterns:
+                click.echo("No shared patterns found across projects.")
+                return
+            click.echo(f"Found {len(patterns)} shared patterns:\n")
+            for i, p in enumerate(patterns, 1):
+                click.echo(f"  {i}. {p['pattern']}")
+                click.echo(f"     Projects ({p['count']}): {', '.join(p['projects'])}")
+                click.echo()
+    finally:
         db.close()
 
 
