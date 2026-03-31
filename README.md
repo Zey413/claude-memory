@@ -100,12 +100,150 @@ This adds a `SessionEnd` hook to `~/.claude/settings.json` that automatically ex
 ## Architecture
 
 ```
-JSONL session logs -> Parser -> Rule-based Extractor -> SQLite + FTS5
-                                                          |
-                                        CLI queries + CLAUDE.md generation
-                                                          |
-                                        SessionEnd hook (auto-trigger)
+                         ┌──────────────────────────────────────────────────┐
+                         │           Claude Code Runtime                    │
+                         │                                                  │
+                         │  Every session is recorded as a .jsonl file:     │
+                         │  ~/.claude/projects/<PATH>/<SESSION_ID>.jsonl    │
+                         │                                                  │
+                         │  Each line = one JSON message:                   │
+                         │    - user messages (prompts, preferences)        │
+                         │    - assistant messages (text + tool_use blocks) │
+                         │    - file-history-snapshot, queue-operation      │
+                         └──────────────────────┬───────────────────────────┘
+                                                │
+                                                │ SessionEnd hook triggers
+                                                │ `claude-memory ingest --latest`
+                                                ▼
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                          claude-memory Pipeline                               │
+│                                                                               │
+│  ┌─────────────┐    ┌──────────────────────┐    ┌──────────────────────────┐  │
+│  │             │    │                      │    │                          │  │
+│  │  Parser     │───▶│  Rule-based          │───▶│  SQLite + FTS5          │  │
+│  │  (parser.py)│    │  Extractor           │    │  (db.py)                │  │
+│  │             │    │  (extractor.py)       │    │                          │  │
+│  │ JSONL ──▶   │    │                      │    │  memories table          │  │
+│  │ ParsedMsg   │    │  5 extraction rules: │    │  sessions table          │  │
+│  │             │    │  - Decisions          │    │  tags table              │  │
+│  └─────────────┘    │  - File patterns     │    │  memories_fts (FTS5)     │  │
+│                     │  - TODOs             │    │                          │  │
+│                     │  - Error/fix pairs   │    │  BM25 ranking            │  │
+│                     │  - Preferences       │    │  Porter stemming         │  │
+│                     └──────────────────────┘    └────────────┬─────────────┘  │
+│                                                              │                │
+│                     ┌────────────────────────────────────────┼────────────┐   │
+│                     │                                        │            │   │
+│                     ▼                                        ▼            │   │
+│          ┌──────────────────┐                     ┌─────────────────┐     │   │
+│          │  CLAUDE.md       │                     │  CLI            │     │   │
+│          │  Generator       │                     │  (cli.py)       │     │   │
+│          │  (generator.py)  │                     │                 │     │   │
+│          │                  │                     │  search, list,  │     │   │
+│          │  Writes to:      │                     │  ingest, stats, │     │   │
+│          │  - memory/       │                     │  generate, ...  │     │   │
+│          │    context.md    │                     │                 │     │   │
+│          │  - CLAUDE.md     │                     │  11 commands    │     │   │
+│          └──────────────────┘                     └─────────────────┘     │   │
+│                     │                                                     │   │
+│                     ▼                                                     │   │
+│          ┌──────────────────────────────────────────────────────────┐     │   │
+│          │  Next Claude Code session auto-reads CLAUDE.md          │     │   │
+│          │  → Context from past sessions is available immediately  │     │   │
+│          └──────────────────────────────────────────────────────────┘     │   │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## How It Works — Extraction Principles
+
+### Data Source: Claude Code Session Logs
+
+Claude Code automatically saves every conversation to `~/.claude/projects/<PATH>/<SESSION_ID>.jsonl`. Each line is a JSON object representing one message in the conversation:
+
+```jsonl
+{"type":"user","message":{"role":"user","content":"Let's build a REST API"},"timestamp":"...","cwd":"/my/project"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll use FastAPI..."},{"type":"tool_use","name":"Write","input":{"file_path":"main.py","content":"..."}}]}}
+```
+
+These files contain **everything** — every prompt you typed, every response Claude gave, every file read/written, every command executed. For the quant project, 7 sessions produced **3,635 JSONL lines (7.1 MB)** of raw conversation data.
+
+### Step 1: Parse (parser.py)
+
+The parser reads each JSONL line and converts it into a structured `ParsedMessage`:
+
+```
+Raw JSONL line  ──▶  ParsedMessage
+                       ├── role: "user" | "assistant"
+                       ├── text_content: (XML tags stripped)
+                       ├── tool_uses: [ToolUse(name, input_data)]
+                       ├── timestamp, cwd, git_branch
+                       └── is_meta: (skip /clear, /model commands)
+```
+
+From the assistant messages, it extracts **tool_use blocks** — these tell us exactly which files were created (`Write`), edited (`Edit`), read (`Read`), and what shell commands were run (`Bash`).
+
+### Step 2: Extract (extractor.py)
+
+Five rule-based extractors scan the parsed messages using **regex patterns and structural analysis** (no LLM calls needed):
+
+| Extractor | What it finds | How | Example |
+|-----------|--------------|-----|---------|
+| **Decisions** | Architecture/design choices | Regex: `"let's use X"`, `"decided to X"`, `"going to implement X"` | "Let's use FastAPI for the REST API" |
+| **File Patterns** | Which files were modified together | Track `Write`/`Edit` tool_use blocks, group by directory | "Modified 8 files in /tests" |
+| **TODOs** | Unfinished work | `TaskCreate` tool uses + regex for `TODO`, `FIXME`, `need to` | "Add API documentation" |
+| **Error/Fix Pairs** | Bugs and their solutions | Find `Bash` failures (error keywords in output) → look ahead 5 messages for resolution | "Fixed import error by..." |
+| **Preferences** | User style choices | Regex on user messages: `"I prefer"`, `"always use"`, `"don't use"` | "I prefer pytest over unittest" |
+
+### Step 3: Store & Index (db.py)
+
+Extracted memories go into SQLite with **FTS5 full-text search**:
+
+```
+memories table (id, session_id, project, type, title, content, confidence)
+    │
+    ├── memories_fts (FTS5 virtual table with Porter stemming + BM25 ranking)
+    ├── memory_tags (many-to-many junction table)
+    └── sessions table (summary stats per session)
+```
+
+### Step 4: Generate (generator.py)
+
+The generator aggregates memories into a `CLAUDE.md` file that Claude Code **automatically reads on session start**:
+
+```markdown
+# Project Memory — quant
+> Auto-generated by claude-memory
+
+## Key Decisions
+- Use Alembic for database migrations
+- ...
+
+## Active TODOs
+- [ ] Add rollback support
+- ...
+
+## Recent Sessions
+- 2026-03-30 (13h): Built memory system, 77 interactions
+- ...
+```
+
+### Real-World Results (quant project)
+
+| Metric | Value |
+|--------|-------|
+| Sessions processed | 7 |
+| Total JSONL lines | 3,635 |
+| Raw data size | 7.1 MB |
+| User interactions | 1,120 |
+| Tool invocations | 836 |
+| **Memories extracted** | **117** |
+| Breakdown: TODOs | 80 (68%) |
+| Breakdown: Patterns | 31 (27%) |
+| Breakdown: Decisions | 4 (3%) |
+| Breakdown: Preferences | 2 (2%) |
+| Database size | 248 KB |
+
+The 117 memories are distilled from 7.1 MB of raw conversation into 248 KB of structured, searchable knowledge — a **29x compression ratio** while retaining the most important context.
 
 ## Development
 
