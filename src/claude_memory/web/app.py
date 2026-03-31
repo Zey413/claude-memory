@@ -18,6 +18,9 @@ from claude_memory.search import MemorySearch
 
 logger = logging.getLogger(__name__)
 
+# Valid memory type values for input validation
+_VALID_MEMORY_TYPES = frozenset(t.value for t in MemoryType)
+
 # ── Singleton state (mirrors mcp_server.py pattern) ────────────────────────
 
 _db: MemoryDB | None = None
@@ -77,6 +80,47 @@ app.add_middleware(
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
+def _validate_limit(limit: int) -> int:
+    """Clamp limit to 1-500 range."""
+    return max(1, min(limit, 500))
+
+
+def _validate_offset(offset: int) -> int:
+    """Ensure offset is >= 0."""
+    return max(0, offset)
+
+
+def _validate_query(q: str) -> str:
+    """Strip whitespace and enforce max 500 chars."""
+    q = q.strip()
+    if len(q) > 500:
+        q = q[:500]
+    return q
+
+
+def _validate_memory_id(memory_id: str) -> str:
+    """Validate that memory_id is a non-empty string."""
+    memory_id = memory_id.strip()
+    if not memory_id:
+        raise HTTPException(status_code=400, detail="memory_id must be a non-empty string")
+    return memory_id
+
+
+def _validate_memory_type(type_str: str | None) -> MemoryType | None:
+    """Validate type filter against MemoryType values. Returns None if input is None."""
+    if type_str is None:
+        return None
+    if type_str not in _VALID_MEMORY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid memory type '{type_str}'."
+                f" Must be one of: {sorted(_VALID_MEMORY_TYPES)}"
+            ),
+        )
+    return MemoryType(type_str)
+
+
 def _memory_to_dict(mem) -> dict:
     """Convert a Memory to a JSON-serializable dict."""
     return {
@@ -125,7 +169,9 @@ async def search_memories(
     try:
         _get_db()
         search = _get_search()
-        mt = MemoryType(type) if type else None
+        q = _validate_query(q)
+        limit = _validate_limit(limit)
+        mt = _validate_memory_type(type)
         results = search.search(
             query=q,
             project_path=project,
@@ -140,6 +186,8 @@ async def search_memories(
             }
             for r in results
         ]
+    except HTTPException:
+        raise
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -157,9 +205,12 @@ async def list_memories(
     """List memories with optional filters."""
     try:
         db = _get_db()
-        if type and project:
+        limit = _validate_limit(limit)
+        offset = _validate_offset(offset)
+        mt = _validate_memory_type(type)
+        if mt and project:
             memories = db.get_memories_by_type(
-                project, MemoryType(type), limit=limit + offset,
+                project, mt, limit=limit + offset,
             )
         elif project:
             memories = db.get_memories_by_project(project, limit=limit + offset)
@@ -168,6 +219,8 @@ async def list_memories(
         # Apply offset
         memories = memories[offset:][:limit]
         return [_memory_to_dict(m) for m in memories]
+    except HTTPException:
+        raise
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -180,6 +233,7 @@ async def get_memory(memory_id: str):
     """Get a single memory by ID."""
     try:
         db = _get_db()
+        memory_id = _validate_memory_id(memory_id)
         mem = db.get_memory(memory_id)
         if mem is None:
             raise HTTPException(status_code=404, detail="Memory not found")
@@ -198,6 +252,7 @@ async def delete_memory(memory_id: str):
     """Delete a memory."""
     try:
         db = _get_db()
+        memory_id = _validate_memory_id(memory_id)
         deleted = db.delete_memory(memory_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Memory not found")
@@ -234,6 +289,7 @@ async def list_sessions(project: str | None = None, limit: int = 20):
     """List session summaries."""
     try:
         db = _get_db()
+        limit = _validate_limit(limit)
         sessions = db.get_recent_sessions(project_path=project, limit=limit)
         return [_session_to_dict(s) for s in sessions]
     except RuntimeError as exc:
@@ -286,6 +342,9 @@ async def get_timeline(session_id: str):
     """Get session timeline events."""
     try:
         db = _get_db()
+        session_id = session_id.strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id must be a non-empty string")
         session = db.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -309,6 +368,7 @@ async def get_top_memories(project: str | None = None, limit: int = 10):
     """Get top memories by importance score."""
     try:
         db = _get_db()
+        limit = _validate_limit(limit)
         memories = db.get_top_memories(project_path=project, limit=limit)
         result = []
         for m in memories:

@@ -7,6 +7,10 @@ import logging
 from claude_memory.db import MemoryDB
 from claude_memory.models import Memory, MemoryType, SearchResult
 
+__all__ = [
+    "MemorySearch",
+]
+
 logger = logging.getLogger(__name__)
 
 

@@ -334,3 +334,104 @@ def test_graph_empty(client):
     data = resp.json()
     assert data["nodes"] == []
     assert data["edges"] == []
+
+
+# ── New tests ─────────────────────────────────────────────────────────────
+
+
+def test_search_empty_query_string(client, populated_db):
+    """Search with empty string for q returns results or empty list."""
+    resp = client.get("/api/search", params={"q": ""})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+
+
+def test_search_with_project_filter(client, populated_db):
+    """Search with project filter narrows results."""
+    resp = client.get("/api/search", params={
+        "q": "test", "project": "/tmp/other-project",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    for item in data:
+        assert item["project_path"] == "/tmp/other-project"
+
+
+def test_memories_with_offset_skips(client, populated_db):
+    """List with large offset returns fewer items."""
+    resp = client.get("/api/memories", params={"offset": 2, "limit": 50})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 1  # 3 total, offset 2, so 1 left
+
+
+def test_memories_with_type_todo(client, populated_db):
+    """List with type=todo and project returns only TODO memories."""
+    resp = client.get("/api/memories", params={
+        "type": "todo", "project": "/tmp/other-project",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["memory_type"] == "todo"
+
+
+def test_graph_with_project_filter(client, populated_db):
+    """Graph with project filter returns only that project's nodes."""
+    resp = client.get("/api/graph", params={"project": "/tmp/test-project"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, dict)
+    for node in data["nodes"]:
+        assert node["project"] == "/tmp/test-project"
+
+
+def test_stats_with_project_filter_counts(client, populated_db):
+    """Stats with unknown project filter returns 0 counts."""
+    resp = client.get("/api/stats", params={"project": "/nonexistent/project"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_memories"] == 0
+    assert data["project_filter"] == "/nonexistent/project"
+
+
+def test_top_with_limit_zero(client, populated_db):
+    """Top with limit=2 returns at most 2 items."""
+    resp = client.get("/api/top", params={"limit": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) <= 2
+
+
+def test_delete_nonexistent_memory(client, populated_db):
+    """DELETE /api/memories/fake-id-xxx returns 404."""
+    resp = client.delete("/api/memories/fake-id-xxx")
+    assert resp.status_code == 404
+
+
+def test_cors_headers_present(client, populated_db):
+    """Verify CORS headers are present on responses."""
+    resp = client.get(
+        "/api/memories",
+        headers={"Origin": "http://localhost:3000"},
+    )
+    assert resp.status_code == 200
+    assert "access-control-allow-origin" in resp.headers
+
+
+def test_memories_with_type_and_project(client, populated_db):
+    """List with type and project filters combined."""
+    resp = client.get("/api/memories", params={
+        "type": "decision", "project": "/tmp/test-project",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["memory_type"] == "decision"
+    assert data[0]["project_path"] == "/tmp/test-project"

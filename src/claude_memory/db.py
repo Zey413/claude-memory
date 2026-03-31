@@ -12,6 +12,11 @@ from claude_memory.config import MemoryConfig
 from claude_memory.models import Memory, MemoryType, SearchResult, SessionSummary, Tag
 from claude_memory.utils import iso_now, parse_iso
 
+__all__ = [
+    "MemoryDB",
+    "MIGRATIONS",
+]
+
 logger = logging.getLogger(__name__)
 
 # Retry configuration for "database is locked" errors
@@ -589,6 +594,26 @@ class MemoryDB:
         if row is None:
             return 0.0
         return row["importance_score"] or 0.0
+
+    def get_importance_scores_batch(self, memory_ids: list[str]) -> dict[str, float]:
+        """Get importance scores for multiple memories in one query."""
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" * len(memory_ids))
+        rows = self._execute(
+            f"SELECT id, importance_score FROM memories WHERE id IN ({placeholders})",
+            tuple(memory_ids),
+        ).fetchall()
+        return {r["id"]: r["importance_score"] or 0.0 for r in rows}
+
+    def update_importance_scores_batch(self, scores: dict[str, float]) -> None:
+        """Update importance scores for multiple memories in one transaction."""
+        for mem_id, score in scores.items():
+            self._execute(
+                "UPDATE memories SET importance_score = ? WHERE id = ?",
+                (score, mem_id),
+            )
+        self.conn.commit()
 
     # ── Embedding Storage ────────────────────────────────────────────────
 

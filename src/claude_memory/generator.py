@@ -189,7 +189,7 @@ class ClaudemdGenerator:
         If all scores are 0 (never consolidated), fall back to recency
         (newest first).
         """
-        scores = {m.id: self.db.get_importance_score(m.id) for m in memories}
+        scores = self.db.get_importance_scores_batch([m.id for m in memories])
         all_zero = all(s == 0.0 for s in scores.values())
         if all_zero:
             return sorted(memories, key=lambda m: m.created_at, reverse=True)
@@ -206,6 +206,23 @@ class ClaudemdGenerator:
         if score > 0.4:
             return "\u2606"
         return ""
+
+    def _score_indicators_batch(self, memories: list[Memory]) -> dict[str, str]:
+        """Return star indicators for a list of memories using a single batch query.
+
+        ★ for score > 0.7, ☆ for score > 0.4, empty string otherwise.
+        """
+        scores = self.db.get_importance_scores_batch([m.id for m in memories])
+        result: dict[str, str] = {}
+        for m in memories:
+            score = scores.get(m.id, 0.0)
+            if score > 0.7:
+                result[m.id] = "\u2605"
+            elif score > 0.4:
+                result[m.id] = "\u2606"
+            else:
+                result[m.id] = ""
+        return result
 
     # ── Topic Clustering ────────────────────────────────────────────────
 
@@ -299,13 +316,17 @@ class ClaudemdGenerator:
         sorted_memories = self._sort_by_importance(memories)
         clusters = self._cluster_by_topic(sorted_memories)
 
+        # Pre-fetch all score indicators in one batch
+        all_mems = [m for mems in clusters.values() for m in mems]
+        indicators = self._score_indicators_batch(all_mems)
+
         lines: list[str] = [f"## {title}\n"]
 
         for cluster_name, mems in clusters.items():
             mems = self._sort_by_importance(mems)
             lines.append(f"### {cluster_name}\n")
             for mem in mems[:_MAX_ITEMS_PER_SECTION]:
-                indicator = self._score_indicator(mem)
+                indicator = indicators.get(mem.id, "")
                 text = _memory_one_liner(mem, score_indicator=indicator)
                 if checkbox:
                     lines.append(f"- [ ] {text.strip()}")
@@ -406,9 +427,10 @@ class ClaudemdGenerator:
             project_path, MemoryType.DECISION, limit=limit,
         )
         decisions = self._sort_by_importance(decisions)
+        decision_indicators = self._score_indicators_batch(decisions)
         sections.append(_section(
             "Key Decisions",
-            [_memory_one_liner(m, self._score_indicator(m)) for m in decisions],
+            [_memory_one_liner(m, decision_indicators.get(m.id, "")) for m in decisions],
         ))
 
         # 2. Active TODOs (clustered by topic)
@@ -448,9 +470,10 @@ class ClaudemdGenerator:
             project_path, MemoryType.PREFERENCE, limit=limit,
         )
         preferences = self._sort_by_importance(preferences)
+        pref_indicators = self._score_indicators_batch(preferences)
         sections.append(_section(
             "User Preferences",
-            [_memory_one_liner(m, self._score_indicator(m)) for m in preferences],
+            [_memory_one_liner(m, pref_indicators.get(m.id, "")) for m in preferences],
         ))
 
         # 6. Known Issues & Solutions (importance-sorted)
@@ -462,11 +485,13 @@ class ClaudemdGenerator:
         )
         issues = self._sort_by_importance(issues)
         solutions = self._sort_by_importance(solutions)
+        all_issue_solution = issues + solutions
+        is_indicators = self._score_indicators_batch(all_issue_solution)
         issue_lines: list[str] = []
         for m in issues:
-            issue_lines.append(f"\U0001f41b {_memory_one_liner(m, self._score_indicator(m))}")
+            issue_lines.append(f"\U0001f41b {_memory_one_liner(m, is_indicators.get(m.id, ''))}")
         for m in solutions:
-            issue_lines.append(f"\u2705 {_memory_one_liner(m, self._score_indicator(m))}")
+            issue_lines.append(f"\u2705 {_memory_one_liner(m, is_indicators.get(m.id, ''))}")
         sections.append(_section("Known Issues & Solutions", issue_lines))
 
         # Assemble – drop empty sections
@@ -507,9 +532,10 @@ class ClaudemdGenerator:
         decisions = self._sort_by_importance(
             self.search.by_type(project_path, MemoryType.DECISION, limit=limit)
         )
+        decision_indicators = self._score_indicators_batch(decisions)
         section_builders["Key Decisions"] = _section(
             "Key Decisions",
-            [_memory_one_liner(m, self._score_indicator(m)) for m in decisions],
+            [_memory_one_liner(m, decision_indicators.get(m.id, "")) for m in decisions],
         )
 
         # Active TODOs
@@ -544,9 +570,10 @@ class ClaudemdGenerator:
         prefs = self._sort_by_importance(
             self.search.by_type(project_path, MemoryType.PREFERENCE, limit=limit)
         )
+        pref_indicators = self._score_indicators_batch(prefs)
         section_builders["User Preferences"] = _section(
             "User Preferences",
-            [_memory_one_liner(m, self._score_indicator(m)) for m in prefs],
+            [_memory_one_liner(m, pref_indicators.get(m.id, "")) for m in prefs],
         )
 
         # Known Issues & Solutions
@@ -556,14 +583,16 @@ class ClaudemdGenerator:
         solutions = self._sort_by_importance(
             self.search.by_type(project_path, MemoryType.SOLUTION, limit=limit)
         )
+        all_is = issues + solutions
+        is_indicators = self._score_indicators_batch(all_is)
         issue_lines_list: list[str] = []
         for m in issues:
             issue_lines_list.append(
-                f"\U0001f41b {_memory_one_liner(m, self._score_indicator(m))}"
+                f"\U0001f41b {_memory_one_liner(m, is_indicators.get(m.id, ''))}"
             )
         for m in solutions:
             issue_lines_list.append(
-                f"\u2705 {_memory_one_liner(m, self._score_indicator(m))}"
+                f"\u2705 {_memory_one_liner(m, is_indicators.get(m.id, ''))}"
             )
         section_builders["Known Issues & Solutions"] = _section(
             "Known Issues & Solutions", issue_lines_list,

@@ -114,7 +114,7 @@ class MemoryConsolidator:
         """
         memories = self.db.get_all_memories(project_path=project_path)
         now = datetime.now(timezone.utc)
-        count = 0
+        scores: dict[str, float] = {}
 
         for mem in memories:
             type_weight = TYPE_WEIGHTS.get(mem.memory_type.value, 0.4)
@@ -129,10 +129,12 @@ class MemoryConsolidator:
 
             score = type_weight * recency * confidence * (1.0 + 0.1 * tag_count)
 
-            self.db.update_importance_score(mem.id, score)
-            count += 1
+            scores[mem.id] = score
 
-        return count
+        if scores:
+            self.db.update_importance_scores_batch(scores)
+
+        return len(scores)
 
     # ── Duplicate detection ───────────────────────────────────────────────
 

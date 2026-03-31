@@ -8,6 +8,15 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+__all__ = [
+    "MemoryType",
+    "Memory",
+    "SessionSummary",
+    "Tag",
+    "ProjectContext",
+    "SearchResult",
+]
+
 
 class MemoryType(str, Enum):
     """Categories of extractable memories."""

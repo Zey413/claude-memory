@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import logging
 
+__all__ = [
+    "is_available",
+    "EmbeddingEngine",
+]
+
 logger = logging.getLogger(__name__)
 
 _MODEL_ID = "all-MiniLM-L6-v2"

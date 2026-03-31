@@ -39,7 +39,7 @@ def test_cli_version():
     runner = CliRunner()
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.5.0" in result.output
+    assert "0.6.0" in result.output
 
 
 def test_cli_stats_empty(tmp_path):
@@ -296,3 +296,268 @@ def test_reset_confirmation_yes(tmp_path):
     result = runner.invoke(cli, ["--db", str(db_path), "reset"], input="y\n")
     assert result.exit_code == 0
     assert "Database reset complete" in result.output
+
+
+# ── Search command tests ────────────────────────────────────────────────────
+
+
+def test_search_command(tmp_path):
+    """Test basic search via CLI finds matching memories."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, title="FastAPI architecture", content="Using FastAPI for REST.")
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "search", "FastAPI"])
+    assert result.exit_code == 0
+    assert "FastAPI" in result.output
+
+
+def test_search_no_results(tmp_path):
+    """Test search for nonexistent query returns no results message."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db)
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "search", "xyznonexistent"])
+    assert result.exit_code == 0
+    assert "No memories found" in result.output
+
+
+# ── List with filter tests ──────────────────────────────────────────────────
+
+
+def test_list_with_type_filter(tmp_path):
+    """Test list --type decision filters by memory type."""
+    db_path = tmp_path / "test.db"
+    project_path = str(tmp_path / "myproject")
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, project_path=project_path, memory_type=MemoryType.DECISION,
+                          title="A decision")
+    _insert_sample_memory(db, project_path=project_path, memory_type=MemoryType.TODO,
+                          title="A todo")
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "list",
+        "--type", "decision", "--project", project_path,
+    ])
+    assert result.exit_code == 0
+    assert "A decision" in result.output
+
+
+def test_list_with_project_filter(tmp_path):
+    """Test list --project filters memories to specific project."""
+    db_path = tmp_path / "test.db"
+    project_a = str(tmp_path / "project-a")
+    project_b = str(tmp_path / "project-b")
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, project_path=project_a, title="Memory A")
+    _insert_sample_memory(db, project_path=project_b, title="Memory B")
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "--json-output", "list",
+        "--project", project_a,
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0]["title"] == "Memory A"
+
+
+# ── Generate command tests ──────────────────────────────────────────────────
+
+
+def test_generate_stdout(tmp_path):
+    """Test generate --target stdout prints markdown to console."""
+    db_path = tmp_path / "test.db"
+    project_path = tmp_path / "myproject"
+    project_path.mkdir()
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, project_path=str(project_path))
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "generate",
+        "--project", str(project_path), "--target", "stdout",
+    ])
+    assert result.exit_code == 0
+    assert "myproject" in result.output
+    assert "#" in result.output
+
+
+def test_generate_to_dir(tmp_path):
+    """Test generate --target project_root writes CLAUDE.md file."""
+    db_path = tmp_path / "test.db"
+    project_path = tmp_path / "myproject"
+    project_path.mkdir()
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, project_path=str(project_path))
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "generate",
+        "--project", str(project_path), "--target", "project_root",
+    ])
+    assert result.exit_code == 0
+    assert "Generated CLAUDE.md" in result.output
+    assert (project_path / "CLAUDE.md").exists()
+
+
+# ── Projects and sessions commands ──────────────────────────────────────────
+
+
+def test_projects_command(tmp_path):
+    """Test projects command runs without error."""
+    db_path = tmp_path / "test.db"
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "projects"])
+    assert result.exit_code == 0
+    # The projects command reads ~/.claude/projects so it may find real data
+    # or no data — either way it shouldn't crash
+    assert result.output is not None
+
+
+def test_sessions_command(tmp_path):
+    """Test sessions command with no sessions."""
+    db_path = tmp_path / "test.db"
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "sessions"])
+    assert result.exit_code == 0
+    assert "No sessions found" in result.output
+
+
+# ── Export with filters ─────────────────────────────────────────────────────
+
+
+def test_export_with_type_filter(tmp_path):
+    """Test export --type decision only exports decisions."""
+    db_path = tmp_path / "test.db"
+    project_path = str(tmp_path / "proj")
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, project_path=project_path,
+                          memory_type=MemoryType.DECISION, title="A decision")
+    _insert_sample_memory(db, project_path=project_path,
+                          memory_type=MemoryType.TODO, title="A todo")
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "export",
+        "--project", project_path, "--type", "decision",
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0]["memory_type"] == "decision"
+
+
+def test_export_with_project_filter(tmp_path):
+    """Test export --project filters to one project."""
+    db_path = tmp_path / "test.db"
+    proj_a = str(tmp_path / "proj-a")
+    proj_b = str(tmp_path / "proj-b")
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db, project_path=proj_a, title="Memory A")
+    _insert_sample_memory(db, project_path=proj_b, title="Memory B")
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "export", "--project", proj_a,
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0]["title"] == "Memory A"
+
+
+# ── Tag command tests ───────────────────────────────────────────────────────
+
+
+def test_tag_add(tmp_path):
+    """Test tag --add adds a tag to a memory."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    mem = _insert_sample_memory(db, tags=[])
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "tag",
+        "--memory-id", mem.id, "--add", "important",
+    ])
+    assert result.exit_code == 0
+    assert "Added tag: important" in result.output
+
+
+def test_tag_remove(tmp_path):
+    """Test tag --remove removes a tag from a memory."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    mem = _insert_sample_memory(db, tags=["testing", "tooling"])
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "--db", str(db_path), "tag",
+        "--memory-id", mem.id, "--remove", "tooling",
+    ])
+    assert result.exit_code == 0
+    assert "Removed tag: tooling" in result.output
+
+
+# ── Consolidate command tests ───────────────────────────────────────────────
+
+
+def test_consolidate_command(tmp_path):
+    """Test consolidate runs without errors."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db)
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "consolidate"])
+    assert result.exit_code == 0
+    assert "Consolidation complete" in result.output
+    assert "Memories scored:" in result.output
+
+
+def test_consolidate_dry_run(tmp_path):
+    """Test consolidate --dry-run shows report without modifying DB."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db)
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "consolidate", "--dry-run"])
+    assert result.exit_code == 0
+    assert "Dry run" in result.output
+    assert "Memories to score:" in result.output
+
+
+# ── Top command test ────────────────────────────────────────────────────────
+
+
+def test_top_command(tmp_path):
+    """Test top shows memories (or message to consolidate first)."""
+    db_path = tmp_path / "test.db"
+    db = MemoryDB(db_path=db_path)
+    _insert_sample_memory(db)
+    db.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--db", str(db_path), "top"])
+    assert result.exit_code == 0
+    # With un-scored memories, it returns them with 0 scores
+    assert "Top" in result.output or "No memories found" in result.output

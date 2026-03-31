@@ -395,3 +395,171 @@ def test_word_set():
     """word_set correctly tokenises and lowercases."""
     words = _word_set("Hello World hello")
     assert words == {"hello", "world"}
+
+
+# ── New consolidator tests ──────────────────────────────────────────────────
+
+
+def test_consolidate_empty_db(tmp_db: MemoryDB):
+    """No memories → report with all zeroes."""
+    consolidator = MemoryConsolidator(tmp_db)
+    report = consolidator.consolidate()
+
+    assert isinstance(report, ConsolidationReport)
+    assert report.memories_scored == 0
+    assert report.duplicates_found == 0
+    assert report.duplicates_merged == 0
+    assert report.todos_archived == 0
+    assert report.top_memories == []
+
+
+def test_score_with_tags(tmp_db: MemoryDB):
+    """Tagged memories should score higher than untagged ones (all else equal)."""
+    now = datetime.now(timezone.utc)
+    tagged = _make_memory(
+        memory_type=MemoryType.DECISION,
+        title="Tagged decision",
+        content="A decision with tags.",
+        tags=["api", "python", "architecture"],
+        created_at=now,
+    )
+    untagged = _make_memory(
+        memory_type=MemoryType.DECISION,
+        title="Untagged decision",
+        content="A decision without tags.",
+        tags=[],
+        created_at=now,
+    )
+    tmp_db.insert_memory(tagged)
+    tmp_db.insert_memory(untagged)
+
+    consolidator = MemoryConsolidator(tmp_db)
+    consolidator.score_memories()
+
+    score_tagged = tmp_db.get_importance_score(tagged.id)
+    score_untagged = tmp_db.get_importance_score(untagged.id)
+    assert score_tagged > score_untagged
+
+
+def test_archive_changes_type(tmp_db: MemoryDB):
+    """Verify archiving actually changes TODO to CONTEXT type in DB."""
+    now = datetime.now(timezone.utc)
+    old_todo = _make_memory(
+        memory_type=MemoryType.TODO,
+        title="Very old TODO",
+        content="This should be archived.",
+        created_at=now - timedelta(days=90),
+    )
+    tmp_db.insert_memory(old_todo)
+
+    # Verify it starts as TODO
+    before = tmp_db.get_memory(old_todo.id)
+    assert before is not None
+    assert before.memory_type == MemoryType.TODO
+
+    consolidator = MemoryConsolidator(tmp_db)
+    archived = consolidator.archive_stale_todos(days=30)
+    assert len(archived) == 1
+
+    # Verify type changed in DB
+    after = tmp_db.get_memory(old_todo.id)
+    assert after is not None
+    assert after.memory_type == MemoryType.CONTEXT
+
+
+def test_merge_keeps_higher_score(tmp_db: MemoryDB):
+    """Verify merge keeps the memory with higher importance score."""
+    m1 = _make_memory(
+        memory_type=MemoryType.DECISION,
+        title="Use FastAPI for REST API",
+        content="We decided to use FastAPI for the REST API because it is modern.",
+    )
+    m2 = _make_memory(
+        memory_type=MemoryType.DECISION,
+        title="Use FastAPI for REST API",
+        content="We decided to use FastAPI for the REST API because it is modern and fast.",
+    )
+    tmp_db.insert_memory(m1)
+    tmp_db.insert_memory(m2)
+
+    # Manually set scores so m2 is higher
+    tmp_db.update_importance_score(m1.id, 0.3)
+    tmp_db.update_importance_score(m2.id, 0.9)
+
+    consolidator = MemoryConsolidator(tmp_db)
+    pairs = consolidator.find_duplicates()
+    assert len(pairs) == 1
+
+    keep, remove = pairs[0]
+    assert keep.id == m2.id, "Should keep the higher-scored memory"
+    assert remove.id == m1.id, "Should remove the lower-scored memory"
+
+    consolidator.merge_duplicates(pairs)
+    assert tmp_db.count_memories() == 1
+    remaining = tmp_db.get_memory(m2.id)
+    assert remaining is not None
+
+
+def test_full_pipeline_with_data(tmp_db: MemoryDB):
+    """Insert data → consolidate → verify scoring, dedup, and archival."""
+    now = datetime.now(timezone.utc)
+
+    # Normal memory
+    m1 = _make_memory(
+        memory_type=MemoryType.DECISION,
+        title="Use microservices",
+        content="Decided on microservices architecture for scaling.",
+        tags=["architecture", "scaling"],
+    )
+    # Duplicate pair
+    m2 = _make_memory(
+        memory_type=MemoryType.PATTERN,
+        title="Always use structured logging",
+        content="We use structured logging with JSON output in every service.",
+    )
+    m3 = _make_memory(
+        memory_type=MemoryType.PATTERN,
+        title="Always use structured logging",
+        content="We use structured logging with JSON output in every single service.",
+    )
+    # Old TODO to archive
+    m4 = _make_memory(
+        memory_type=MemoryType.TODO,
+        title="Refactor old module",
+        content="Needs refactoring.",
+        created_at=now - timedelta(days=45),
+    )
+    # Recent TODO (should NOT be archived)
+    m5 = _make_memory(
+        memory_type=MemoryType.TODO,
+        title="Write tests",
+        content="Need more tests.",
+        created_at=now - timedelta(days=2),
+    )
+
+    for m in [m1, m2, m3, m4, m5]:
+        tmp_db.insert_memory(m)
+
+    assert tmp_db.count_memories() == 5
+
+    consolidator = MemoryConsolidator(tmp_db)
+    report = consolidator.consolidate()
+
+    assert report.memories_scored == 5
+    assert report.duplicates_found >= 1
+    assert report.duplicates_merged >= 1
+    assert report.todos_archived >= 1
+
+    # After consolidation: one duplicate removed + one TODO archived (type changed)
+    # Count should be 5 - 1 (duplicate removed) = 4
+    assert tmp_db.count_memories() == 4
+
+    # The old TODO should now be CONTEXT type
+    refreshed_m4 = tmp_db.get_memory(m4.id)
+    assert refreshed_m4 is not None
+    assert refreshed_m4.memory_type == MemoryType.CONTEXT
+
+    # The recent TODO should still be a TODO
+    refreshed_m5 = tmp_db.get_memory(m5.id)
+    assert refreshed_m5 is not None
+    assert refreshed_m5.memory_type == MemoryType.TODO

@@ -1,19 +1,61 @@
 # claude-memory
 
+[![PyPI](https://img.shields.io/pypi/v/claude-memory)](https://pypi.org/project/claude-memory/)
+[![Tests](https://img.shields.io/badge/tests-259%20passed-brightgreen)]()
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-green)]()
+
 Cross-session memory system for Claude Code. Extract, index, and recall context across sessions.
 
 ## Features
 
-- **Automatic Memory Extraction**: Parses Claude Code session logs (JSONL) to extract decisions, patterns, TODOs, issues, solutions, and preferences
-- **Full-Text Search**: SQLite FTS5-powered search with BM25 ranking
-- **CLAUDE.md Generation**: Auto-generates project context files that Claude Code reads on session start
-- **Hook Integration**: SessionEnd hook auto-triggers extraction when sessions end
-- **Lightweight**: Only requires `click` and `pydantic` — no vector DB, no LLM API calls
+### Core
+- **Automatic Memory Extraction** — rule-based parsing of Claude Code session logs (JSONL) into structured memories
+- **Full-Text Search** — SQLite FTS5 with BM25 ranking and Porter stemming
+- **CLAUDE.md Generation** — auto-generates project context files that Claude Code reads on session start
+
+### AI-Powered
+- **Semantic Search** — sentence-transformer embeddings for meaning-based recall
+- **Hybrid Search** — combines FTS5 keyword matching with semantic similarity for best results
+
+### Analysis
+- **Knowledge Graph** — visualize cross-project memory relationships and shared patterns
+- **Memory Consolidation** — dedup, importance scoring, and stale TODO archival
+- **Session Diff & Replay** — compare sessions or replay a session timeline event by event
+
+### Integration
+- **MCP Server** — Model Context Protocol server lets Claude query memories in real-time during sessions
+- **SessionEnd Hook** — auto-triggers extraction when Claude Code sessions end
+- **Watch Mode** — daemon that monitors for new sessions and auto-ingests
+
+### User Interface
+- **Web Dashboard** — full-featured browser UI with search, browse, graph, stats, timeline, and session views
+- **Rich Terminal** — color-coded tables, panels, and formatted output via the `rich` library
+- **23-Command CLI** — comprehensive command-line interface for every operation
+
+## Quick Start
+
+```bash
+# 1. Install
+pip install claude-memory
+
+# 2. Ingest your Claude Code sessions
+claude-memory ingest --all
+
+# 3. Search your memories
+claude-memory search "authentication"
+```
+
+That's it. Memories are extracted from your existing Claude Code session logs and indexed for instant recall.
 
 ## Installation
 
 ```bash
-pip install claude-memory
+pip install claude-memory                    # Core (FTS5 search, CLI, Rich output)
+pip install 'claude-memory[web]'             # + Web Dashboard (FastAPI)
+pip install 'claude-memory[embeddings]'      # + Semantic search (sentence-transformers)
+pip install 'claude-memory[mcp]'             # + MCP server
+pip install 'claude-memory[web,embeddings]'  # Full install
 ```
 
 Or install from source:
@@ -21,139 +63,85 @@ Or install from source:
 ```bash
 git clone https://github.com/Zey413/claude-memory.git
 cd claude-memory
-pip install -e ".[dev]"
+pip install -e ".[dev,web,embeddings,mcp]"
 ```
 
-## Quick Start
+## Web Dashboard
 
-### 1. Ingest sessions
+Launch with `claude-memory ui` (requires `pip install 'claude-memory[web]'`):
 
 ```bash
-# Ingest the most recent session
-claude-memory ingest --latest
-
-# Ingest all sessions for current project
-claude-memory ingest --all
-
-# Ingest sessions for a specific project
-claude-memory ingest --all --project /path/to/project
+claude-memory ui --open          # Opens browser to http://localhost:8765
 ```
 
-### 2. Search memories
+The dashboard provides six views:
 
-```bash
-claude-memory search "authentication"
-claude-memory search "database" --type decision
-claude-memory search "pytest" --tag testing
-```
-
-### 3. Generate CLAUDE.md
-
-```bash
-# Write to ~/.claude/projects/<PATH>/memory/context.md
-claude-memory generate
-
-# Write to project root
-claude-memory generate --target project_root
-
-# Print to stdout
-claude-memory generate --target stdout
-```
-
-### 4. Install auto-extraction hook
-
-```bash
-claude-memory install-hook
-```
-
-This adds a `SessionEnd` hook to `~/.claude/settings.json` that automatically extracts memories when a Claude Code session ends.
+| View | Description |
+|------|-------------|
+| **Search** | Real-time keyword and semantic search across all memories |
+| **Browse** | Filter and explore memories by type, project, and tags |
+| **Graph** | Interactive knowledge graph of memory relationships |
+| **Stats** | System-wide statistics, memory type distribution, and project breakdown |
+| **Timeline** | Chronological event timeline for session replay |
+| **Sessions** | Session history with metadata and extraction summaries |
 
 ## CLI Commands
 
+All 23 commands available via `claude-memory <command>`:
+
 | Command | Description |
 |---------|-------------|
-| `ingest` | Extract memories from session logs |
-| `search` | Full-text search over memories |
-| `list` | List memories with filters |
+| **Ingestion** | |
+| `ingest` | Extract memories from Claude Code session logs |
+| `watch` | Auto-ingest new sessions in daemon mode |
+| `install-hook` | Install SessionEnd hook for auto-extraction |
+| `uninstall-hook` | Remove the SessionEnd hook |
+| **Search & Browse** | |
+| `search` | Full-text, semantic (`--semantic`), or hybrid (`--hybrid`) search |
+| `list` | List memories with type/project/tag filters |
+| `top` | Show top memories ranked by importance score |
 | `sessions` | List processed session summaries |
-| `generate` | Generate CLAUDE.md context |
-| `stats` | Show system statistics |
-| `projects` | List discovered projects |
-| `install-hook` | Install SessionEnd hook |
-| `uninstall-hook` | Remove SessionEnd hook |
-| `tag` | Manage memory tags |
+| `projects` | List all discovered projects with session data |
+| **Analysis** | |
+| `graph` | Analyze cross-project memory relationships (summary/dot/json) |
+| `shared-patterns` | Find patterns and decisions shared across projects |
+| `consolidate` | Dedup, score, and archive stale memories |
+| `diff` | Compare memories between two sessions |
+| `replay` | Replay a session timeline showing key events |
+| `stats` | Show system-wide memory statistics |
+| **Generation & Export** | |
+| `generate` | Generate CLAUDE.md project context from memories |
 | `export` | Export memories to JSON |
-| `import-data` | Import memories from JSON |
-| `consolidate` | Dedup, score, archive stale memories |
-| `top` | Show top memories by importance score |
-| `diff` | Compare memories between sessions |
-| `watch` | Auto-ingest new sessions (daemon mode) |
-| `serve` | Start MCP server for real-time access |
-| `reset` | Reset database (destructive) |
+| `import-data` | Import memories from a JSON file |
+| **AI & Embeddings** | |
+| `embed` | Generate sentence-transformer embeddings for all memories |
+| **Servers** | |
+| `serve` | Start MCP server for real-time memory access |
+| `ui` | Launch the web dashboard |
+| **Management** | |
+| `tag` | Add/remove/list memory tags |
+| `reset` | Reset the memory database (destructive) |
 
 ### Global Options
 
 | Option | Description |
 |--------|-------------|
+| `--db PATH` | Custom database path |
 | `--json-output` | Machine-readable JSON output |
 | `-v, --verbose` | Enable debug logging |
-| `--db PATH` | Custom database path |
-
-## v0.3.0 Features
-
-### MCP Server Integration
-
-Claude Code can query memories in real-time during a session:
-
-```bash
-# Start the MCP server
-claude-memory serve
-
-# Or add to your Claude Code MCP config:
-# claude-memory-mcp (entry point)
-```
-
-Exposes 4 tools: `memory_search`, `memory_list`, `memory_stats`, `memory_context`.
-
-### Watch Mode (Auto-Ingestion)
-
-```bash
-# Watch for new sessions and auto-ingest
-claude-memory watch
-
-# Custom poll interval and project filter
-claude-memory watch --interval 10 --project /path/to/project
-```
-
-### Memory Consolidation
-
-```bash
-# Score, dedup, and archive stale memories
-claude-memory consolidate
-
-# Preview changes without applying
-claude-memory consolidate --dry-run
-
-# Show top memories by importance
-claude-memory top --limit 5
-```
-
-### Rich Terminal UI
-
-Beautiful output with tables, panels, and color-coded memory types powered by the `rich` library.
 
 ## Memory Types
 
-| Type | Description |
-|------|-------------|
-| `decision` | Architecture/design decisions |
-| `pattern` | Code patterns, conventions |
-| `issue` | Bugs found, errors encountered |
-| `solution` | How issues were resolved |
-| `preference` | User preferences, style choices |
-| `context` | Project context, domain knowledge |
-| `todo` | Unfinished work, future plans |
-| `learning` | New concepts, techniques discovered |
+| Type | Description | Example |
+|------|-------------|---------|
+| `decision` | Architecture and design decisions | "Use FastAPI for the REST API" |
+| `pattern` | Code patterns and conventions | "Modified 8 files in /tests" |
+| `issue` | Bugs found, errors encountered | "Import error in module X" |
+| `solution` | How issues were resolved | "Fixed by adding \_\_init\_\_.py" |
+| `preference` | User preferences and style choices | "Prefer pytest over unittest" |
+| `context` | Project context, domain knowledge | "Service uses PostgreSQL 15" |
+| `todo` | Unfinished work, future plans | "Add API rate limiting" |
+| `learning` | New concepts, techniques discovered | "FTS5 supports Porter stemming" |
 
 ## Architecture
 
@@ -170,7 +158,7 @@ Beautiful output with tables, panels, and color-coded memory types powered by th
                          │    - file-history-snapshot, queue-operation      │
                          └──────────────────────┬───────────────────────────┘
                                                 │
-                                                │ SessionEnd hook triggers
+                                                │ SessionEnd hook / watch mode
                                                 │ `claude-memory ingest --latest`
                                                 ▼
 ┌───────────────────────────────────────────────────────────────────────────────┐
@@ -185,30 +173,31 @@ Beautiful output with tables, panels, and color-coded memory types powered by th
 │  │ ParsedMsg   │    │  5 extraction rules: │    │  sessions table          │  │
 │  │             │    │  - Decisions          │    │  tags table              │  │
 │  └─────────────┘    │  - File patterns     │    │  memories_fts (FTS5)     │  │
-│                     │  - TODOs             │    │                          │  │
-│                     │  - Error/fix pairs   │    │  BM25 ranking            │  │
-│                     │  - Preferences       │    │  Porter stemming         │  │
-│                     └──────────────────────┘    └────────────┬─────────────┘  │
+│                     │  - TODOs             │    │  embeddings (optional)   │  │
+│                     │  - Error/fix pairs   │    │                          │  │
+│                     │  - Preferences       │    │  BM25 ranking            │  │
+│                     └──────────────────────┘    │  Porter stemming         │  │
+│                                                 └────────────┬─────────────┘  │
 │                                                              │                │
-│                     ┌────────────────────────────────────────┼────────────┐   │
-│                     │                                        │            │   │
-│                     ▼                                        ▼            │   │
-│          ┌──────────────────┐                     ┌─────────────────┐     │   │
-│          │  CLAUDE.md       │                     │  CLI            │     │   │
-│          │  Generator       │                     │  (cli.py)       │     │   │
-│          │  (generator.py)  │                     │                 │     │   │
-│          │                  │                     │  search, list,  │     │   │
-│          │  Writes to:      │                     │  ingest, stats, │     │   │
-│          │  - memory/       │                     │  generate, ...  │     │   │
-│          │    context.md    │                     │                 │     │   │
-│          │  - CLAUDE.md     │                     │  11 commands    │     │   │
-│          └──────────────────┘                     └─────────────────┘     │   │
-│                     │                                                     │   │
-│                     ▼                                                     │   │
-│          ┌──────────────────────────────────────────────────────────┐     │   │
-│          │  Next Claude Code session auto-reads CLAUDE.md          │     │   │
-│          │  → Context from past sessions is available immediately  │     │   │
-│          └──────────────────────────────────────────────────────────┘     │   │
+│         ┌────────────────────────────────────────────────────┼──────────┐     │
+│         │                    │                    │           │          │     │
+│         ▼                    ▼                    ▼           ▼          │     │
+│  ┌──────────────┐  ┌────────────────┐  ┌──────────────┐ ┌─────────┐   │     │
+│  │ CLAUDE.md    │  │ Web Dashboard  │  │ MCP Server   │ │  CLI    │   │     │
+│  │ Generator    │  │ (FastAPI)      │  │ (mcp_server) │ │ (click) │   │     │
+│  │              │  │                │  │              │ │         │   │     │
+│  │ Writes to:   │  │ 6 views:       │  │ 4 tools:     │ │ 23 cmds │   │     │
+│  │ memory/      │  │ search, browse │  │ search, list │ │         │   │     │
+│  │ context.md   │  │ graph, stats   │  │ stats,       │ │         │   │     │
+│  │              │  │ timeline,      │  │ context      │ │         │   │     │
+│  │              │  │ sessions       │  │              │ │         │   │     │
+│  └──────┬───────┘  └────────────────┘  └──────────────┘ └─────────┘   │     │
+│         │                                                              │     │
+│         ▼                                                              │     │
+│  ┌──────────────────────────────────────────────────────────────────┐  │     │
+│  │  Next Claude Code session auto-reads CLAUDE.md                  │  │     │
+│  │  → Context from past sessions is available immediately          │  │     │
+│  └──────────────────────────────────────────────────────────────────┘  │     │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -223,7 +212,7 @@ Claude Code automatically saves every conversation to `~/.claude/projects/<PATH>
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll use FastAPI..."},{"type":"tool_use","name":"Write","input":{"file_path":"main.py","content":"..."}}]}}
 ```
 
-These files contain **everything** — every prompt you typed, every response Claude gave, every file read/written, every command executed. For the quant project, 7 sessions produced **3,635 JSONL lines (7.1 MB)** of raw conversation data.
+These files contain **everything** — every prompt you typed, every response Claude gave, every file read/written, every command executed.
 
 ### Step 1: Parse (parser.py)
 
@@ -238,19 +227,19 @@ Raw JSONL line  ──▶  ParsedMessage
                        └── is_meta: (skip /clear, /model commands)
 ```
 
-From the assistant messages, it extracts **tool_use blocks** — these tell us exactly which files were created (`Write`), edited (`Edit`), read (`Read`), and what shell commands were run (`Bash`).
+From assistant messages, it extracts **tool_use blocks** — these tell us exactly which files were created (`Write`), edited (`Edit`), read (`Read`), and what shell commands were run (`Bash`).
 
 ### Step 2: Extract (extractor.py)
 
 Five rule-based extractors scan the parsed messages using **regex patterns and structural analysis** (no LLM calls needed):
 
-| Extractor | What it finds | How | Example |
-|-----------|--------------|-----|---------|
-| **Decisions** | Architecture/design choices | Regex: `"let's use X"`, `"decided to X"`, `"going to implement X"` | "Let's use FastAPI for the REST API" |
-| **File Patterns** | Which files were modified together | Track `Write`/`Edit` tool_use blocks, group by directory | "Modified 8 files in /tests" |
-| **TODOs** | Unfinished work | `TaskCreate` tool uses + regex for `TODO`, `FIXME`, `need to` | "Add API documentation" |
-| **Error/Fix Pairs** | Bugs and their solutions | Find `Bash` failures (error keywords in output) → look ahead 5 messages for resolution | "Fixed import error by..." |
-| **Preferences** | User style choices | Regex on user messages: `"I prefer"`, `"always use"`, `"don't use"` | "I prefer pytest over unittest" |
+| Extractor | What it finds | How |
+|-----------|--------------|-----|
+| **Decisions** | Architecture/design choices | Regex: `"let's use X"`, `"decided to X"`, `"going to implement X"` |
+| **File Patterns** | Which files were modified together | Track `Write`/`Edit` tool_use blocks, group by directory |
+| **TODOs** | Unfinished work | `TaskCreate` tool uses + regex for `TODO`, `FIXME`, `need to` |
+| **Error/Fix Pairs** | Bugs and their solutions | Find `Bash` failures → look ahead 5 messages for resolution |
+| **Preferences** | User style choices | Regex on user messages: `"I prefer"`, `"always use"`, `"don't use"` |
 
 ### Step 3: Store & Index (db.py)
 
@@ -261,7 +250,8 @@ memories table (id, session_id, project, type, title, content, confidence)
     │
     ├── memories_fts (FTS5 virtual table with Porter stemming + BM25 ranking)
     ├── memory_tags (many-to-many junction table)
-    └── sessions table (summary stats per session)
+    ├── sessions table (summary stats per session)
+    └── embeddings table (optional, for semantic search)
 ```
 
 ### Step 4: Generate (generator.py)
@@ -269,7 +259,7 @@ memories table (id, session_id, project, type, title, content, confidence)
 The generator aggregates memories into a `CLAUDE.md` file that Claude Code **automatically reads on session start**:
 
 ```markdown
-# Project Memory — quant
+# Project Memory — my-project
 > Auto-generated by claude-memory
 
 ## Key Decisions
@@ -285,35 +275,35 @@ The generator aggregates memories into a `CLAUDE.md` file that Claude Code **aut
 - ...
 ```
 
-### Real-World Results (quant project)
+## MCP Server
 
-| Metric | Value |
-|--------|-------|
-| Sessions processed | 7 |
-| Total JSONL lines | 3,635 |
-| Raw data size | 7.1 MB |
-| User interactions | 1,120 |
-| Tool invocations | 836 |
-| **Memories extracted** | **117** |
-| Breakdown: TODOs | 80 (68%) |
-| Breakdown: Patterns | 31 (27%) |
-| Breakdown: Decisions | 4 (3%) |
-| Breakdown: Preferences | 2 (2%) |
-| Database size | 248 KB |
+Claude Code can query memories in real-time during a session:
 
-The 117 memories are distilled from 7.1 MB of raw conversation into 248 KB of structured, searchable knowledge — a **29x compression ratio** while retaining the most important context.
+```bash
+claude-memory serve
+```
+
+Exposes 4 tools via the Model Context Protocol: `memory_search`, `memory_list`, `memory_stats`, `memory_context`.
+
+Add to your Claude Code MCP config using the `claude-memory-mcp` entry point.
 
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+# Install all dev dependencies
+pip install -e ".[dev,web,embeddings,mcp]"
 
 # Run tests
 pytest
 
-# Run linter
+# Run tests with coverage
+pytest --cov=claude_memory
+
+# Lint
 ruff check src/ tests/
+
+# Format
+ruff format src/ tests/
 ```
 
 ## License

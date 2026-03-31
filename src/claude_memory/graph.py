@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from itertools import combinations
 
 from claude_memory.db import MemoryDB
 from claude_memory.models import Memory, MemoryType
+
+logger = logging.getLogger(__name__)
 
 
 def _word_set(text: str) -> set[str]:
@@ -192,6 +195,10 @@ class GraphBuilder:
 
         Jaccard similarity > 0.3 on title words.
         """
+        if len(memories) > 500:
+            logger.warning("Skipping title similarity edges: too many memories (%d)", len(memories))
+            return
+
         # Pre-compute word sets for titles
         title_words: list[tuple[str, set[str]]] = []
         for mem in memories:
@@ -222,6 +229,23 @@ class GraphBuilder:
         type_index: dict[str, list[Memory]] = defaultdict(list)
         for mem in memories:
             type_index[mem.memory_type.value].append(mem)
+
+        # Estimate total cross-project pairs; skip if too many
+        total_cross_pairs = 0
+        for _mtype, group in type_index.items():
+            projects: dict[str, int] = defaultdict(int)
+            for mem in group:
+                projects[mem.project_path] += 1
+            proj_counts = list(projects.values())
+            for i in range(len(proj_counts)):
+                for j in range(i + 1, len(proj_counts)):
+                    total_cross_pairs += proj_counts[i] * proj_counts[j]
+        if total_cross_pairs > 1000:
+            logger.warning(
+                "Skipping cross-project edges: too many cross-project pairs (%d)",
+                total_cross_pairs,
+            )
+            return
 
         for _mtype, group in type_index.items():
             # Pre-compute content word sets

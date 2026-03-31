@@ -473,3 +473,144 @@ def test_estimate_tokens():
     assert _estimate_tokens("hello world") == int(2 * 1.3)
     assert _estimate_tokens("one two three four five") == int(5 * 1.3)
     assert _estimate_tokens("") == 0
+
+
+# ── New generator tests ─────────────────────────────────────────────────────
+
+
+def test_generate_empty_project(tmp_db):
+    """No memories for a project produces minimal output with just a header."""
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+
+    content = gen.generate_project_context("/tmp/empty-project")
+    assert "empty-project" in content
+    # Should have a header at minimum
+    assert content.startswith("#")
+    # Should NOT have section content for decisions/todos
+    assert "Key Decisions" not in content or content.count("-") < 3
+
+
+def test_generate_all_types(tmp_db):
+    """One memory of each type → all relevant sections present."""
+    all_types = [
+        (MemoryType.DECISION, "Use FastAPI", "Framework choice."),
+        (MemoryType.TODO, "Add auth", "Need JWT auth."),
+        (MemoryType.PATTERN, "Repository pattern", "Repo pattern for DB."),
+        (MemoryType.PREFERENCE, "Dark mode", "Prefers dark mode."),
+        (MemoryType.ISSUE, "Login bug", "Login fails on timeout."),
+        (MemoryType.SOLUTION, "Fix login", "Added retry logic."),
+    ]
+    for mtype, title, content in all_types:
+        tmp_db.insert_memory(Memory(
+            session_id="s1", project_path="/tmp/all-types",
+            memory_type=mtype, title=title, content=content,
+        ))
+
+    # Add session so generator works
+    tmp_db.insert_session(SessionSummary(
+        session_id="s1", project_path="/tmp/all-types",
+        started_at=datetime(2026, 3, 30, 10, 0, tzinfo=timezone.utc),
+        duration_minutes=60.0,
+    ))
+
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+    content = gen.generate_project_context("/tmp/all-types")
+
+    assert "Key Decisions" in content
+    assert "Active TODOs" in content
+    assert "Code Patterns" in content
+    assert "User Preferences" in content
+    assert "Known Issues" in content
+
+
+def test_clustered_section_markdown(tmp_db):
+    """Verify clustered section produces ### sub-headings."""
+    # Insert memories that share keywords so they cluster
+    for i in range(4):
+        tmp_db.insert_memory(Memory(
+            session_id="s1", project_path="/tmp/cluster-test",
+            memory_type=MemoryType.TODO,
+            title=f"Authentication token refresh {i}",
+            content=f"Fix auth token issue {i}.",
+            tags=["auth", "token"],
+        ))
+
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+    memories = tmp_db.get_all_memories("/tmp/cluster-test")
+    section = gen._clustered_section("Test Section", memories)
+
+    assert "## Test Section" in section
+    assert "###" in section
+
+
+def test_write_to_project_root(tmp_db, tmp_path):
+    """Verify write_to_project_root creates CLAUDE.md in the project dir."""
+    project_path = str(tmp_path / "my-project")
+    (tmp_path / "my-project").mkdir()
+    tmp_db.insert_memory(Memory(
+        session_id="s1", project_path=project_path,
+        memory_type=MemoryType.DECISION, title="Test",
+        content="Testing write.",
+    ))
+
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+    path = gen.write_to_project_root(project_path)
+
+    assert path.exists()
+    assert path.name == "CLAUDE.md"
+    assert "my-project" in path.read_text()
+
+
+def test_atomic_write_safety(tmp_db, tmp_path):
+    """Verify atomic write doesn't leave .tmp files behind."""
+    dest = tmp_path / "subdir" / "test.md"
+    ClaudemdGenerator._atomic_write(dest, "hello world")
+    assert dest.exists()
+    assert dest.read_text() == "hello world"
+
+    import os
+    # No .tmp files should remain
+    parent_files = os.listdir(str(dest.parent))
+    tmp_files = [f for f in parent_files if f.endswith(".tmp")]
+    assert len(tmp_files) == 0
+
+
+def test_recent_activity_no_sessions(tmp_db):
+    """No sessions for a project produces no Recent Activity section."""
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+    section = gen._recent_activity_section("/tmp/no-sessions")
+    assert section == ""
+
+
+def test_budget_very_small(tmp_db):
+    """Very small budget (100 tokens) produces only header."""
+    tmp_db.insert_memory(Memory(
+        session_id="s1", project_path="/tmp/budget-test",
+        memory_type=MemoryType.DECISION, title="Big decision",
+        content="A very important decision with lots of context.",
+    ))
+
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+    result = gen.generate_with_budget("/tmp/budget-test", token_budget=100)
+
+    # Should start with header
+    assert result.startswith("#")
+    # Token estimate footer should still be there
+    assert "<!-- Token estimate:" in result
+
+
+def test_budget_includes_footer(tmp_db):
+    """Token estimate footer is always present in budgeted output."""
+    _populate_test_data(tmp_db)
+    search = MemorySearch(tmp_db)
+    gen = ClaudemdGenerator(tmp_db, search)
+
+    result = gen.generate_with_budget("/tmp/test-proj", token_budget=10000)
+    assert "<!-- Token estimate:" in result
+    assert "tokens -->" in result

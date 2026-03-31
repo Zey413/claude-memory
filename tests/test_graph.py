@@ -459,3 +459,128 @@ def test_no_self_loops(tmp_db: MemoryDB):
     graph2.add_edge(GraphEdge(source="x", target="x", relationship="shared_tag"))
     assert len(graph2.edges) == 0, "Self-loop should have been rejected"
     assert graph2.degree("x") == 0
+
+
+# ── New graph tests ─────────────────────────────────────────────────────────
+
+
+def test_graph_large_dataset(tmp_db: MemoryDB):
+    """50 memories → graph builds without crash."""
+    for i in range(50):
+        mem = _make_memory(
+            session_id=f"s{i % 5}",
+            project_path=f"/tmp/project-{i % 3}",
+            memory_type=MemoryType.DECISION if i % 2 == 0 else MemoryType.PATTERN,
+            title=f"Memory number {i} about topic {i % 7}",
+            content=f"Content for memory {i} with details about area {i % 7}.",
+            tags=[f"tag{i % 4}", f"tag{i % 6}"],
+        )
+        tmp_db.insert_memory(mem)
+
+    builder = GraphBuilder(tmp_db)
+    graph = builder.build()
+
+    assert len(graph.nodes) == 50
+    # Should have some edges from shared tags, sessions, etc.
+    assert len(graph.edges) > 0
+
+
+def test_dot_export_valid_syntax(tmp_db: MemoryDB):
+    """Verify DOT export starts/ends correctly and has node declarations."""
+    m1 = _make_memory(title="Node A", content="Content A", tags=["x"])
+    m2 = _make_memory(title="Node B", content="Content B", tags=["x"])
+    m3 = _make_memory(title="Node C", content="Content C", tags=["y"])
+    tmp_db.insert_memory(m1)
+    tmp_db.insert_memory(m2)
+    tmp_db.insert_memory(m3)
+
+    builder = GraphBuilder(tmp_db)
+    graph = builder.build()
+    dot = builder.export_dot(graph)
+
+    # Valid DOT format checks
+    assert dot.startswith("graph KnowledgeGraph {")
+    assert dot.strip().endswith("}")
+    # Should have node declarations with labels
+    assert 'label="Node A"' in dot
+    assert 'label="Node B"' in dot
+    assert 'label="Node C"' in dot
+    # Should contain type attributes
+    assert 'type="decision"' in dot
+
+
+def test_json_export_parseable(tmp_db: MemoryDB):
+    """Verify JSON export is valid JSON with correct structure."""
+    m1 = _make_memory(title="JSON A", content="Content A", tags=["t1"])
+    m2 = _make_memory(title="JSON B", content="Content B", tags=["t1"])
+    tmp_db.insert_memory(m1)
+    tmp_db.insert_memory(m2)
+
+    builder = GraphBuilder(tmp_db)
+    graph = builder.build()
+    json_str = builder.export_json(graph)
+
+    # Must be valid JSON
+    data = json.loads(json_str)
+    assert isinstance(data, dict)
+    assert "nodes" in data
+    assert "edges" in data
+    assert len(data["nodes"]) == 2
+
+    # Verify node fields
+    for node in data["nodes"]:
+        assert "id" in node
+        assert "title" in node
+        assert "memory_type" in node
+        assert "project" in node
+        assert "tags" in node
+        assert "importance" in node
+
+    # Verify edge fields
+    for edge in data["edges"]:
+        assert "source" in edge
+        assert "target" in edge
+        assert "relationship" in edge
+        assert "weight" in edge
+
+
+def test_shared_patterns_empty(tmp_db: MemoryDB):
+    """No cross-project data → empty shared patterns."""
+    # All memories in the same project
+    m1 = _make_memory(
+        project_path="/tmp/same-project",
+        memory_type=MemoryType.PATTERN,
+        title="Only one project pattern",
+        content="Some pattern.",
+    )
+    tmp_db.insert_memory(m1)
+
+    builder = GraphBuilder(tmp_db)
+    patterns = builder.find_shared_patterns()
+    assert patterns == []
+
+
+def test_graph_summary_keys(tmp_db: MemoryDB):
+    """Verify get_summary returns all expected keys."""
+    m1 = _make_memory(
+        project_path="/tmp/projA", title="A1", content="C1", tags=["x"],
+    )
+    m2 = _make_memory(
+        project_path="/tmp/projB", title="B1", content="C2", tags=["x"],
+    )
+    tmp_db.insert_memory(m1)
+    tmp_db.insert_memory(m2)
+
+    builder = GraphBuilder(tmp_db)
+    graph = builder.build()
+    summary = builder.get_summary(graph)
+
+    expected_keys = {
+        "node_count", "edge_count", "cluster_count",
+        "project_count", "cross_project_edges", "hub_memories",
+    }
+    assert expected_keys == set(summary.keys())
+    assert summary["node_count"] == 2
+    assert summary["project_count"] == 2
+    assert isinstance(summary["hub_memories"], list)
+    assert isinstance(summary["cross_project_edges"], int)
