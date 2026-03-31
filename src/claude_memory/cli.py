@@ -701,6 +701,41 @@ def serve(ctx: click.Context, transport: str) -> None:
     mcp_server.run(transport=transport)
 
 
+# ── UI (Web Dashboard) ──────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.option('--port', default=8420, help='Port to serve on')
+@click.option('--host', default='127.0.0.1', help='Host to bind to')
+@click.option('--open', 'open_browser', is_flag=True, help='Open browser automatically')
+@click.pass_context
+def ui(ctx, port, host, open_browser):
+    """Launch the web dashboard (local server)."""
+    try:
+        import uvicorn
+
+        from claude_memory.web.app import app, init_app
+    except ImportError:
+        click.echo(
+            "Error: Web dependencies not installed.\n"
+            "Install with: pip install 'claude-memory[web]'",
+            err=True,
+        )
+        sys.exit(1)
+
+    db_path = ctx.obj.get("db_path") if ctx.obj else None
+    init_app(db_path)
+
+    url = f"http://{host}:{port}"
+    click.echo(f"Starting Claude Memory Dashboard at {url}")
+
+    if open_browser:
+        import webbrowser
+        webbrowser.open(url)
+
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 # ── Consolidate ──────────────────────────────────────────────────────────────
 
 @cli.command()

@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Memory Dashboard</title>
+<style>
+/* ── CSS Variables / Theme ─────────────────────────────────────────────── */
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-card: #1c2333;
+  --bg-card-hover: #222d3f;
+  --bg-input: #0d1117;
+  --border: #30363d;
+  --border-light: #3d444d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent: #58a6ff;
+  --accent-hover: #79b8ff;
+  --highlight: #e94560;
+  --highlight-hover: #f06080;
+  --success: #3fb950;
+  --warning: #d29922;
+  --sidebar-w: 220px;
+  --header-h: 56px;
+  --footer-h: 36px;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --shadow: 0 1px 3px rgba(0,0,0,.4);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,.5);
+  /* type colors */
+  --type-decision: #22d3ee;
+  --type-todo: #eab308;
+  --type-pattern: #4ade80;
+  --type-issue: #f87171;
+  --type-solution: #60a5fa;
+  --type-preference: #c084fc;
+  --type-context: #9ca3af;
+  --type-learning: #e2e8f0;
+}
+
+/* ── Reset & Base ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  overflow: hidden;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+button { cursor: pointer; font-family: inherit; }
+input, select { font-family: inherit; }
+
+/* ── Layout Shell ──────────────────────────────────────────────────────── */
+.app {
+  display: grid;
+  grid-template-rows: var(--header-h) 1fr var(--footer-h);
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-areas:
+    "header  header"
+    "sidebar main"
+    "footer  footer";
+  height: 100vh;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  z-index: 10;
+}
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -.3px;
+}
+.header-brand span { font-size: 22px; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.project-select {
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 28px 6px 10px;
+  font-size: 13px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  min-width: 180px;
+}
+.project-select:focus { outline: none; border-color: var(--accent); }
+.badge-version {
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────── */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  padding: 12px 0;
+  overflow-y: auto;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  transition: all .15s;
+  border-left: 3px solid transparent;
+}
+.nav-item:hover {
+  color: var(--text-primary);
+  background: rgba(88,166,255,.06);
+}
+.nav-item.active {
+  color: var(--accent);
+  background: rgba(88,166,255,.1);
+  border-left-color: var(--accent);
+}
+.nav-item .nav-icon { font-size: 16px; width: 22px; text-align: center; }
+.nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 16px;
+}
+
+/* ── Main Content ──────────────────────────────────────────────────────── */
+.main {
+  grid-area: main;
+  overflow-y: auto;
+  padding: 24px 28px;
+  scroll-behavior: smooth;
+}
+.view { display: none; animation: fadeIn .2s ease; }
+.view.active { display: block; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── Footer ────────────────────────────────────────────────────────────── */
+.footer {
+  grid-area: footer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.footer .dot { opacity: .4; }
+
+/* ── Common Components ─────────────────────────────────────────────────── */
+.page-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.card:hover {
+  border-color: var(--border-light);
+  box-shadow: var(--shadow);
+}
+.search-input-wrap {
+  position: relative;
+  margin-bottom: 20px;
+}
+.search-input {
+  width: 100%;
+  padding: 12px 16px 12px 42px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 15px;
+  transition: border-color .15s;
+}
+.search-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,.15); }
+.search-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 16px;
+  pointer-events: none;
+}
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filter-select {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.filter-select:focus { outline: none; border-color: var(--accent); }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  transition: all .15s;
+}
+.btn:hover { border-color: var(--border-light); background: var(--bg-card-hover); }
+.btn-danger { border-color: #da3633; color: #f85149; }
+.btn-danger:hover { background: rgba(248,81,73,.15); }
+.btn-accent { border-color: var(--accent); color: var(--accent); }
+.btn-accent:hover { background: rgba(88,166,255,.12); }
+
+/* ── Type Badge ────────────────────────────────────────────────────────── */
+.type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.type-badge[data-type="decision"]   { background: rgba(34,211,238,.12); color: var(--type-decision); }
+.type-badge[data-type="todo"]       { background: rgba(234,179,8,.12);  color: var(--type-todo); }
+.type-badge[data-type="pattern"]    { background: rgba(74,222,128,.12); color: var(--type-pattern); }
+.type-badge[data-type="issue"]      { background: rgba(248,113,113,.12);color: var(--type-issue); }
+.type-badge[data-type="solution"]   { background: rgba(96,165,250,.12); color: var(--type-solution); }
+.type-badge[data-type="preference"] { background: rgba(192,132,252,.12);color: var(--type-preference); }
+.type-badge[data-type="context"]    { background: rgba(156,163,175,.12);color: var(--type-context); }
+.type-badge[data-type="learning"]   { background: rgba(226,232,240,.12);color: var(--type-learning); }
+
+/* ── Memory Card ───────────────────────────────────────────────────────── */
+.memory-card {
+  margin-bottom: 12px;
+  cursor: default;
+}
+.memory-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.memory-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.memory-card-score {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.memory-card-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 10px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.memory-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tag-pill {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: rgba(88,166,255,.1);
+  color: var(--accent);
+  border: 1px solid rgba(88,166,255,.2);
+}
+.memory-card-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* ── Stats Cards ───────────────────────────────────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 28px;
+}
+.stat-card {
+  text-align: center;
+  padding: 20px 16px;
+}
+.stat-value {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--accent);
+  line-height: 1.1;
+}
+.stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-top: 6px;
+}
+
+/* ── Bar Chart (CSS) ───────────────────────────────────────────────────── */
+.bar-chart { margin-top: 8px; }
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.bar-label {
+  width: 100px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+}
+.bar-track {
+  flex: 1;
+  height: 24px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width .5s ease;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bg-primary);
+  min-width: 30px;
+}
+.bar-count {
+  font-size: 13px;
+  color: var(--text-muted);
+  width: 40px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* ── Table ─────────────────────────────────────────────────────────────── */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th {
+  background: var(--bg-card);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .4px;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+th:hover { color: var(--text-primary); }
+th .sort-arrow { margin-left: 4px; opacity: .4; font-size: 10px; }
+th.sorted .sort-arrow { opacity: 1; color: var(--accent); }
+td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(88,166,255,.03); }
+td.title-cell {
+  font-weight: 500;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Expanded Row Detail ───────────────────────────────────────────────── */
+.row-detail {
+  padding: 16px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  animation: fadeIn .15s ease;
+}
+.row-detail-content {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  line-height: 1.7;
+  margin-bottom: 12px;
+}
+.row-detail-meta {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Pagination ────────────────────────────────────────────────────────── */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+.page-btn {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.page-btn:disabled { opacity: .3; cursor: not-allowed; }
+.page-info { font-size: 13px; color: var(--text-muted); }
+
+/* ── Graph Placeholder ─────────────────────────────────────────────────── */
+#graph-container {
+  width: 100%;
+  min-height: 480px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+.graph-stat { font-size: 42px; font-weight: 800; color: var(--accent); }
+.graph-label { font-size: 14px; }
+.graph-detail {
+  display: flex;
+  gap: 32px;
+  margin-top: 4px;
+}
+.graph-detail-item { text-align: center; }
+.graph-detail-value { font-size: 24px; font-weight: 700; color: var(--text-primary); }
+.graph-detail-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; }
+
+/* ── Timeline ──────────────────────────────────────────────────────────── */
+.timeline-list { position: relative; padding-left: 28px; }
+.timeline-list::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+  border-radius: 1px;
+}
+.timeline-item {
+  position: relative;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -23px;
+  top: 16px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-primary);
+}
+.timeline-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.timeline-title { font-size: 14px; font-weight: 600; }
+.timeline-body { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+
+/* ── Session Cards ─────────────────────────────────────────────────────── */
+.session-card {
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+.session-card:hover { border-color: var(--accent); }
+.session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.session-date { font-weight: 600; font-size: 14px; }
+.session-branch {
+  font-size: 12px;
+  color: var(--type-pattern);
+  background: rgba(74,222,128,.1);
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+.session-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.session-summary {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  line-height: 1.6;
+}
+
+/* ── Loading & Empty ───────────────────────────────────────────────────── */
+.loading {
+  text-align: center;
+  padding: 48px;
+  color: var(--text-muted);
+}
+.loading::after {
+  content: '';
+  display: block;
+  width: 28px;
+  height: 28px;
+  margin: 12px auto 0;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty-state {
+  text-align: center;
+  padding: 56px 20px;
+  color: var(--text-muted);
+}
+.empty-state .empty-icon { font-size: 40px; margin-bottom: 12px; }
+.empty-state p { font-size: 14px; max-width: 360px; margin: 0 auto; }
+.error-banner {
+  background: rgba(248,81,73,.1);
+  border: 1px solid rgba(248,81,73,.3);
+  color: #f85149;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+/* ── Dialog / Confirm ──────────────────────────────────────────────────── */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: fadeIn .15s ease;
+}
+.dialog-box {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  min-width: 340px;
+  box-shadow: var(--shadow-lg);
+}
+.dialog-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; }
+.dialog-body { font-size: 14px; color: var(--text-secondary); margin-bottom: 20px; }
+.dialog-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "main"
+      "footer";
+  }
+  .sidebar { display: none; }
+  .main { padding: 16px; }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ── Header ──────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-brand">
+      <span>🧠</span> Claude Memory Dashboard
+    </div>
+    <div class="header-right">
+      <select id="project-filter" class="project-select" title="Filter by project">
+        <option value="">All Projects</option>
+      </select>
+      <span class="badge-version" id="version-badge">v0.4.0</span>
+    </div>
+  </header>
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────── -->
+  <nav class="sidebar">
+    <button class="nav-item active" data-view="search">
+      <span class="nav-icon">🔍</span> Search
+    </button>
+    <button class="nav-item" data-view="browse">
+      <span class="nav-icon">📋</span> Browse
+    </button>
+    <div class="nav-divider"></div>
+    <button class="nav-item" data-view="graph">
+      <span class="nav-icon">🕸️</span> Graph
+    </button>
+    <button class="nav-item" data-view="stats">
+      <span class="nav-icon">📊</span> Stats
+    </button>
+    <div class="nav-divider"></div>
+    <button class="nav-item" data-view="timeline">
+      <span class="nav-icon">⏱️</span> Timeline
+    </button>
+    <button class="nav-item" data-view="sessions">
+      <span class="nav-icon">📁</span> Sessions
+    </button>
+  </nav>
+
+  <!-- ── Main Content ────────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- SEARCH VIEW -->
+    <div id="view-search" class="view active">
+      <div class="page-title">🔍 Search Memories</div>
+      <div class="search-input-wrap">
+        <span class="search-icon">⌕</span>
+        <input id="search-input" class="search-input" type="text" placeholder="Search memories by keyword, title, or tag..." autofocus>
+      </div>
+      <div class="filter-bar">
+        <select id="search-type-filter" class="filter-select">
+          <option value="">All Types</option>
+          <option value="decision">🧭 Decision</option>
+          <option value="todo">✅ Todo</option>
+          <option value="pattern">🔄 Pattern</option>
+          <option value="issue">🐛 Issue</option>
+          <option value="solution">💡 Solution</option>
+          <option value="preference">⚙️ Preference</option>
+          <option value="context">📝 Context</option>
+          <option value="learning">🎓 Learning</option>
+        </select>
+        <span id="search-result-count" style="font-size:13px;color:var(--text-muted)"></span>
+      </div>
+      <div id="search-results"></div>
+    </div>
+
+    <!-- BROWSE VIEW -->
+    <div id="view-browse" class="view">
+      <div class="page-title">📋 Browse All Memories</div>
+      <div class="filter-bar">
+        <select id="browse-type-filter" class="filter-select">
+          <option value="">All Types</option>
+          <option value="decision">🧭 Decision</option>
+          <option value="todo">✅ Todo</option>
+          <option value="pattern">🔄 Pattern</option>
+          <option value="issue">🐛 Issue</option>
+          <option value="solution">💡 Solution</option>
+          <option value="preference">⚙️ Preference</option>
+          <option value="context">📝 Context</option>
+          <option value="learning">🎓 Learning</option>
+        </select>
+      </div>
+      <div id="browse-table"></div>
+      <div id="browse-pagination" class="pagination"></div>
+    </div>
+
+    <!-- GRAPH VIEW -->
+    <div id="view-graph" class="view">
+      <div class="page-title">🕸️ Knowledge Graph</div>
+      <div id="graph-container">
+        <div class="loading">Loading graph data...</div>
+      </div>
+    </div>
+
+    <!-- STATS VIEW -->
+    <div id="view-stats" class="view">
+      <div class="page-title">📊 Statistics</div>
+      <div id="stats-cards" class="stats-grid"></div>
+      <div id="stats-by-type"></div>
+      <div id="stats-by-project" style="margin-top:28px"></div>
+    </div>
+
+    <!-- TIMELINE VIEW -->
+    <div id="view-timeline" class="view">
+      <div class="page-title">⏱️ Session Timeline</div>
+      <div class="filter-bar">
+        <select id="timeline-session-select" class="filter-select" style="min-width:280px">
+          <option value="">Select a session...</option>
+        </select>
+      </div>
+      <div id="timeline-content"></div>
+    </div>
+
+    <!-- SESSIONS VIEW -->
+    <div id="view-sessions" class="view">
+      <div class="page-title">📁 Sessions</div>
+      <div id="sessions-list"></div>
+    </div>
+
+  </main>
+
+  <!-- ── Footer ──────────────────────────────────────────────────────── -->
+  <footer class="footer">
+    <span id="footer-version">v0.4.0</span>
+    <span class="dot">·</span>
+    <span id="footer-memories">— memories</span>
+    <span class="dot">·</span>
+    <span id="footer-sessions">— sessions</span>
+  </footer>
+</div>
+
+<!-- ── JavaScript ──────────────────────────────────────────────────────── -->
+<script>
+(function() {
+'use strict';
+
+/* ── Constants ─────────────────────────────────────────────────────────── */
+const TYPE_ICONS = {
+  decision:   '🧭',
+  todo:       '✅',
+  pattern:    '🔄',
+  issue:      '🐛',
+  solution:   '💡',
+  preference: '⚙️',
+  context:    '📝',
+  learning:   '🎓',
+};
+
+const TYPE_COLORS = {
+  decision:   'var(--type-decision)',
+  todo:       'var(--type-todo)',
+  pattern:    'var(--type-pattern)',
+  issue:      'var(--type-issue)',
+  solution:   'var(--type-solution)',
+  preference: 'var(--type-preference)',
+  context:    'var(--type-context)',
+  learning:   'var(--type-learning)',
+};
+
+/* ── State ─────────────────────────────────────────────────────────────── */
+let currentView = 'search';
+let currentProject = '';
+let browseState = { page: 0, pageSize: 25, sort: 'created_at', dir: 'desc', type: '' };
+let searchTimeout = null;
+
+/* ── API Helper ────────────────────────────────────────────────────────── */
+async function fetchAPI(endpoint, params = {}) {
+  const url = new URL(endpoint, window.location.origin);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+  });
+  try {
+    const res = await fetch(url.toString());
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    return await res.json();
+  } catch (e) {
+    if (e.name === 'TypeError' && e.message.includes('fetch')) {
+      throw new Error('Cannot connect to API — is the server running?');
+    }
+    throw e;
+  }
+}
+
+/* ── Utility ───────────────────────────────────────────────────────────── */
+function $(sel) { return document.querySelector(sel); }
+function $$(sel) { return document.querySelectorAll(sel); }
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+function formatDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function formatDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+function formatDuration(minutes) {
+  if (!minutes) return '—';
+  if (minutes < 60) return Math.round(minutes) + 'm';
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  return h + 'h ' + m + 'm';
+}
+function debounce(fn, ms) {
+  let timer;
+  return function(...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), ms);
+  };
+}
+function typeBadge(type) {
+  const icon = TYPE_ICONS[type] || '📌';
+  return `<span class="type-badge" data-type="${escHtml(type)}">${icon} ${escHtml(type)}</span>`;
+}
+function tagPills(tags) {
+  if (!tags || !tags.length) return '';
+  return tags.map(t => `<span class="tag-pill">${escHtml(t)}</span>`).join('');
+}
+
+/* ── Navigation ────────────────────────────────────────────────────────── */
+function navigateTo(view) {
+  currentView = view;
+  window.location.hash = view;
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+  $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
+  renderCurrentView();
+}
+
+function renderCurrentView() {
+  switch (currentView) {
+    case 'search':   renderSearch();   break;
+    case 'browse':   renderBrowse();   break;
+    case 'graph':    renderGraph();    break;
+    case 'stats':    renderStats();    break;
+    case 'timeline': renderTimeline(); break;
+    case 'sessions': renderSessions(); break;
+  }
+}
+
+/* ── Confirm Dialog ────────────────────────────────────────────────────── */
+function confirmDialog(title, message) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+      <div class="dialog-box">
+        <div class="dialog-title">${escHtml(title)}</div>
+        <div class="dialog-body">${escHtml(message)}</div>
+        <div class="dialog-actions">
+          <button class="btn" id="dlg-cancel">Cancel</button>
+          <button class="btn btn-danger" id="dlg-confirm">Delete</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#dlg-cancel').onclick = () => { overlay.remove(); resolve(false); };
+    overlay.querySelector('#dlg-confirm').onclick = () => { overlay.remove(); resolve(true); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SEARCH VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+async function renderSearch() {
+  const q = $('#search-input').value.trim();
+  if (!q) {
+    $('#search-results').innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🔍</div>
+        <p>Type a query above to search through your memories. Results update as you type.</p>
+      </div>`;
+    $('#search-result-count').textContent = '';
+    return;
+  }
+  $('#search-results').innerHTML = '<div class="loading">Searching...</div>';
+  try {
+    const typeFilter = $('#search-type-filter').value;
+    const results = await fetchAPI('/api/search', {
+      q, type: typeFilter, project: currentProject, limit: 30,
+    });
+    if (!results.length) {
+      $('#search-results').innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">🤷</div>
+          <p>No memories found for "${escHtml(q)}". Try different keywords.</p>
+        </div>`;
+      $('#search-result-count').textContent = '0 results';
+      return;
+    }
+    $('#search-result-count').textContent = results.length + ' result' + (results.length !== 1 ? 's' : '');
+    $('#search-results').innerHTML = results.map(r => `
+      <div class="card memory-card">
+        <div class="memory-card-header">
+          ${typeBadge(r.memory_type)}
+          <span class="memory-card-title">${escHtml(r.title)}</span>
+          <span class="memory-card-score">Score: ${r.score.toFixed(2)}</span>
+        </div>
+        <div class="memory-card-body">${escHtml(r.highlight || r.content)}</div>
+        <div class="memory-card-footer">
+          ${tagPills(r.tags)}
+          <span class="memory-card-date">${formatDate(r.created_at)}</span>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    $('#search-results').innerHTML = `<div class="error-banner">${escHtml(e.message)}</div>`;
+    $('#search-result-count').textContent = '';
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   BROWSE VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+let browseExpandedId = null;
+
+async function renderBrowse() {
+  const container = $('#browse-table');
+  container.innerHTML = '<div class="loading">Loading memories...</div>';
+  try {
+    const typeFilter = $('#browse-type-filter').value;
+    const memories = await fetchAPI('/api/memories', {
+      project: currentProject,
+      type: typeFilter,
+      limit: browseState.pageSize,
+      offset: browseState.page * browseState.pageSize,
+    });
+    // Also get total count for pagination
+    const allMems = await fetchAPI('/api/memories', {
+      project: currentProject, type: typeFilter, limit: 10000,
+    });
+    const total = allMems.length;
+
+    if (!memories.length) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">📭</div>
+          <p>No memories found. Process some sessions to get started!</p>
+        </div>`;
+      $('#browse-pagination').innerHTML = '';
+      return;
+    }
+
+    // Sort client-side
+    const sorted = [...memories];
+    const sf = browseState.sort;
+    const dir = browseState.dir === 'asc' ? 1 : -1;
+    sorted.sort((a, b) => {
+      let va = a[sf], vb = b[sf];
+      if (sf === 'confidence') return (va - vb) * dir;
+      if (sf === 'created_at') return (new Date(va) - new Date(vb)) * dir;
+      return String(va).localeCompare(String(vb)) * dir;
+    });
+
+    function sortHeader(label, field) {
+      const active = browseState.sort === field;
+      const arrow = active ? (browseState.dir === 'asc' ? '▲' : '▼') : '▽';
+      return `<th class="${active ? 'sorted' : ''}" data-sort="${field}">${label} <span class="sort-arrow">${arrow}</span></th>`;
+    }
+
+    let html = `<div class="table-wrap"><table>
+      <thead><tr>
+        ${sortHeader('Type', 'memory_type')}
+        ${sortHeader('Title', 'title')}
+        ${sortHeader('Confidence', 'confidence')}
+        ${sortHeader('Date', 'created_at')}
+        <th>Actions</th>
+      </tr></thead><tbody>`;
+
+    for (const m of sorted) {
+      const isExpanded = browseExpandedId === m.id;
+      html += `<tr class="browse-row" data-id="${escHtml(m.id)}">
+        <td>${typeBadge(m.memory_type)}</td>
+        <td class="title-cell">${escHtml(m.title)}</td>
+        <td>${m.confidence.toFixed(2)}</td>
+        <td style="white-space:nowrap">${formatDate(m.created_at)}</td>
+        <td><button class="btn btn-danger btn-sm delete-btn" data-id="${escHtml(m.id)}" title="Delete memory">✕</button></td>
+      </tr>`;
+      if (isExpanded) {
+        html += `<tr><td colspan="5" class="row-detail">
+          <div class="row-detail-content">${escHtml(m.content)}</div>
+          <div class="row-detail-meta">
+            <span>ID: ${escHtml(m.id)}</span>
+            <span>Session: ${escHtml(m.session_id)}</span>
+            <span>Project: ${escHtml(m.project_path)}</span>
+            ${m.tags.length ? '<span>Tags: ' + m.tags.map(t => escHtml(t)).join(', ') + '</span>' : ''}
+          </div>
+        </td></tr>`;
+      }
+    }
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+
+    // Pagination
+    const totalPages = Math.ceil(total / browseState.pageSize);
+    const pg = browseState.page;
+    $('#browse-pagination').innerHTML = `
+      <button class="page-btn" ${pg === 0 ? 'disabled' : ''} data-page="${pg - 1}">← Prev</button>
+      <span class="page-info">Page ${pg + 1} of ${totalPages || 1}</span>
+      <button class="page-btn" ${pg >= totalPages - 1 ? 'disabled' : ''} data-page="${pg + 1}">Next →</button>`;
+
+    // Event: sort headers
+    container.querySelectorAll('th[data-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const field = th.dataset.sort;
+        if (browseState.sort === field) {
+          browseState.dir = browseState.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          browseState.sort = field;
+          browseState.dir = field === 'created_at' ? 'desc' : 'asc';
+        }
+        renderBrowse();
+      });
+    });
+
+    // Event: expand rows
+    container.querySelectorAll('.browse-row').forEach(tr => {
+      tr.addEventListener('click', e => {
+        if (e.target.closest('.delete-btn')) return;
+        const id = tr.dataset.id;
+        browseExpandedId = browseExpandedId === id ? null : id;
+        renderBrowse();
+      });
+    });
+
+    // Event: delete buttons
+    container.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const ok = await confirmDialog('Delete Memory', 'Are you sure you want to delete this memory? This action cannot be undone.');
+        if (ok) {
+          try {
+            await fetchAPI('/api/memories/' + encodeURIComponent(id), {});
+            // Actually delete
+            await fetch('/api/memories/' + encodeURIComponent(id), { method: 'DELETE' });
+            browseExpandedId = null;
+            renderBrowse();
+            loadFooterStats();
+          } catch (err) {
+            alert('Failed to delete: ' + err.message);
+          }
+        }
+      });
+    });
+
+    // Event: pagination
+    $('#browse-pagination').querySelectorAll('.page-btn:not(:disabled)').forEach(btn => {
+      btn.addEventListener('click', () => {
+        browseState.page = parseInt(btn.dataset.page);
+        browseExpandedId = null;
+        renderBrowse();
+      });
+    });
+
+  } catch (e) {
+    container.innerHTML = `<div class="error-banner">${escHtml(e.message)}</div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GRAPH VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+async function renderGraph() {
+  const container = $('#graph-container');
+  container.innerHTML = '<div class="loading">Loading graph data...</div>';
+  try {
+    const data = await fetchAPI('/api/graph', { project: currentProject });
+    const nodes = data.nodes || [];
+    const edges = data.edges || [];
+
+    // Count edge types
+    const edgeTypes = {};
+    edges.forEach(e => {
+      const rel = e.relationship || 'unknown';
+      edgeTypes[rel] = (edgeTypes[rel] || 0) + 1;
+    });
+
+    // Count node types
+    const nodeTypes = {};
+    nodes.forEach(n => {
+      const t = n.memory_type || 'unknown';
+      nodeTypes[t] = (nodeTypes[t] || 0) + 1;
+    });
+
+    let edgeBreakdown = Object.entries(edgeTypes)
+      .sort((a, b) => b[1] - a[1])
+      .map(([rel, cnt]) => `<span style="color:var(--text-secondary)">${escHtml(rel)}: <strong>${cnt}</strong></span>`)
+      .join('<span style="opacity:.3;margin:0 8px">·</span>');
+
+    let nodeBreakdown = Object.entries(nodeTypes)
+      .sort((a, b) => b[1] - a[1])
+      .map(([t, cnt]) => `${typeBadge(t)} <strong style="margin-left:2px">${cnt}</strong>`)
+      .join('&nbsp;&nbsp;');
+
+    container.innerHTML = `
+      <div style="text-align:center;padding:40px">
+        <div style="font-size:15px;color:var(--text-muted);margin-bottom:8px">Knowledge Graph</div>
+        <div class="graph-detail">
+          <div class="graph-detail-item">
+            <div class="graph-detail-value">${nodes.length}</div>
+            <div class="graph-detail-label">Nodes</div>
+          </div>
+          <div class="graph-detail-item">
+            <div class="graph-detail-value">${edges.length}</div>
+            <div class="graph-detail-label">Edges</div>
+          </div>
+        </div>
+        ${nodes.length > 0 ? `
+          <div style="margin-top:28px">
+            <div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Nodes by Type</div>
+            <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">${nodeBreakdown}</div>
+          </div>` : ''}
+        ${edges.length > 0 ? `
+          <div style="margin-top:20px">
+            <div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Edge Relationships</div>
+            <div style="font-size:13px">${edgeBreakdown}</div>
+          </div>` : ''}
+        ${nodes.length === 0 ? `
+          <div style="margin-top:24px;color:var(--text-muted);font-size:14px">
+            No graph data available. Process sessions to build the knowledge graph.
+          </div>` : ''}
+      </div>`;
+
+    // Check if external graph.js exists and initialise
+    if (typeof window.initGraph === 'function') {
+      window.initGraph(container, data);
+    }
+  } catch (e) {
+    container.innerHTML = `<div style="padding:40px;text-align:center">
+      <div class="error-banner">${escHtml(e.message)}</div>
+    </div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   STATS VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+async function renderStats() {
+  const cardsEl = $('#stats-cards');
+  const byTypeEl = $('#stats-by-type');
+  const byProjEl = $('#stats-by-project');
+  cardsEl.innerHTML = '<div class="loading">Loading stats...</div>';
+  byTypeEl.innerHTML = '';
+  byProjEl.innerHTML = '';
+
+  try {
+    const stats = await fetchAPI('/api/stats', { project: currentProject });
+    const projects = await fetchAPI('/api/projects');
+
+    // Stat cards
+    cardsEl.innerHTML = `
+      <div class="card stat-card">
+        <div class="stat-value">${stats.total_memories}</div>
+        <div class="stat-label">Total Memories</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-value">${stats.total_sessions}</div>
+        <div class="stat-label">Sessions</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-value">${projects.length}</div>
+        <div class="stat-label">Projects</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-value">${formatBytes(stats.db_size_bytes || 0)}</div>
+        <div class="stat-label">DB Size</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-value">${stats.total_tags || 0}</div>
+        <div class="stat-label">Unique Tags</div>
+      </div>`;
+
+    // By type bar chart
+    const byType = stats.memories_by_type || {};
+    const maxType = Math.max(...Object.values(byType), 1);
+    const typeOrder = ['decision', 'pattern', 'solution', 'todo', 'issue', 'preference', 'context', 'learning'];
+
+    let typeRows = '';
+    for (const t of typeOrder) {
+      const cnt = byType[t] || 0;
+      const pct = Math.round((cnt / maxType) * 100);
+      const color = TYPE_COLORS[t] || 'var(--text-muted)';
+      typeRows += `
+        <div class="bar-row">
+          <div class="bar-label">${TYPE_ICONS[t] || ''} ${t}</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width:${pct}%;background:${color}">${cnt || ''}</div>
+          </div>
+          <div class="bar-count">${cnt}</div>
+        </div>`;
+    }
+    byTypeEl.innerHTML = `
+      <div class="card" style="padding:20px">
+        <div style="font-size:15px;font-weight:600;margin-bottom:14px">Memories by Type</div>
+        <div class="bar-chart">${typeRows}</div>
+      </div>`;
+
+    // By project
+    const byProject = stats.memories_by_project || {};
+    const projEntries = Object.entries(byProject).sort((a, b) => b[1] - a[1]);
+    const maxProj = Math.max(...projEntries.map(p => p[1]), 1);
+
+    if (projEntries.length > 0) {
+      let projRows = '';
+      for (const [path, cnt] of projEntries) {
+        const pct = Math.round((cnt / maxProj) * 100);
+        const name = path.split('/').filter(Boolean).pop() || path;
+        projRows += `
+          <div class="bar-row">
+            <div class="bar-label" title="${escHtml(path)}">${escHtml(name)}</div>
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${pct}%;background:var(--accent)">${cnt}</div>
+            </div>
+            <div class="bar-count">${cnt}</div>
+          </div>`;
+      }
+      byProjEl.innerHTML = `
+        <div class="card" style="padding:20px">
+          <div style="font-size:15px;font-weight:600;margin-bottom:14px">Memories by Project</div>
+          <div class="bar-chart">${projRows}</div>
+        </div>`;
+    }
+  } catch (e) {
+    cardsEl.innerHTML = `<div class="error-banner">${escHtml(e.message)}</div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   TIMELINE VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+async function renderTimeline() {
+  const select = $('#timeline-session-select');
+  const content = $('#timeline-content');
+
+  // Load sessions into dropdown if empty
+  if (select.options.length <= 1) {
+    try {
+      const sessions = await fetchAPI('/api/sessions', { project: currentProject, limit: 50 });
+      select.innerHTML = '<option value="">Select a session...</option>';
+      sessions.forEach(s => {
+        const date = formatDateTime(s.started_at);
+        const branch = s.git_branch ? ` (${s.git_branch})` : '';
+        const opt = document.createElement('option');
+        opt.value = s.session_id;
+        opt.textContent = `${date}${branch} — ${s.message_count} msgs`;
+        select.appendChild(opt);
+      });
+    } catch (e) {
+      content.innerHTML = `<div class="error-banner">${escHtml(e.message)}</div>`;
+      return;
+    }
+  }
+
+  const sessionId = select.value;
+  if (!sessionId) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">⏱️</div>
+        <p>Select a session above to view its timeline.</p>
+      </div>`;
+    return;
+  }
+
+  content.innerHTML = '<div class="loading">Loading timeline...</div>';
+  try {
+    const data = await fetchAPI('/api/timeline/' + encodeURIComponent(sessionId));
+    const session = data.session;
+
+    let html = `
+      <div class="card" style="margin-bottom:20px;padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+          <div>
+            <div style="font-weight:600;font-size:15px">Session: ${escHtml(sessionId.substring(0, 12))}...</div>
+            <div style="font-size:13px;color:var(--text-muted);margin-top:2px">
+              ${formatDateTime(session.started_at)}${session.ended_at ? ' → ' + formatDateTime(session.ended_at) : ''}
+            </div>
+          </div>
+          <div style="display:flex;gap:16px;font-size:13px;color:var(--text-secondary)">
+            ${session.git_branch ? `<span>🌿 ${escHtml(session.git_branch)}</span>` : ''}
+            <span>💬 ${session.message_count} messages</span>
+            <span>⏱ ${formatDuration(session.duration_minutes)}</span>
+          </div>
+        </div>
+        ${session.summary_text ? `<div style="margin-top:12px;font-size:13px;color:var(--text-secondary);line-height:1.6">${escHtml(session.summary_text)}</div>` : ''}
+      </div>`;
+
+    // Session details: files modified, key topics
+    if (session.files_modified && session.files_modified.length > 0) {
+      html += `
+        <div class="card" style="margin-bottom:20px;padding:16px">
+          <div style="font-weight:600;font-size:14px;margin-bottom:10px">📄 Files Modified (${session.files_modified.length})</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${session.files_modified.map(f => `<span class="tag-pill" style="font-size:12px">${escHtml(f.split('/').pop())}</span>`).join('')}
+          </div>
+        </div>`;
+    }
+
+    if (session.key_topics && session.key_topics.length > 0) {
+      html += `
+        <div class="card" style="margin-bottom:20px;padding:16px">
+          <div style="font-weight:600;font-size:14px;margin-bottom:10px">🏷️ Key Topics</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${session.key_topics.map(t => `<span class="tag-pill">${escHtml(t)}</span>`).join('')}
+          </div>
+        </div>`;
+    }
+
+    // Events (may be empty from the API)
+    const events = data.events || [];
+    if (events.length > 0) {
+      html += '<div class="timeline-list">';
+      events.forEach(ev => {
+        html += `
+          <div class="timeline-item">
+            <div class="timeline-time">${formatDateTime(ev.timestamp || ev.created_at)}</div>
+            <div class="timeline-title">${typeBadge(ev.type || 'context')} ${escHtml(ev.title || ev.summary || '')}</div>
+            ${ev.content ? `<div class="timeline-body">${escHtml(ev.content)}</div>` : ''}
+          </div>`;
+      });
+      html += '</div>';
+    } else {
+      // Show memories from this session as timeline items
+      try {
+        const memories = await fetchAPI('/api/memories', { limit: 100 });
+        const sessionMems = memories.filter(m => m.session_id === sessionId);
+        if (sessionMems.length > 0) {
+          html += `<div style="font-size:14px;font-weight:600;margin:16px 0 12px">Memories from this session (${sessionMems.length})</div>`;
+          html += '<div class="timeline-list">';
+          sessionMems.forEach(m => {
+            html += `
+              <div class="timeline-item">
+                <div class="timeline-time">${formatDateTime(m.created_at)}</div>
+                <div class="timeline-title">${typeBadge(m.memory_type)} ${escHtml(m.title)}</div>
+                <div class="timeline-body">${escHtml(m.content.substring(0, 200))}${m.content.length > 200 ? '...' : ''}</div>
+              </div>`;
+          });
+          html += '</div>';
+        }
+      } catch (_) { /* ignore */ }
+    }
+
+    content.innerHTML = html;
+  } catch (e) {
+    content.innerHTML = `<div class="error-banner">${escHtml(e.message)}</div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SESSIONS VIEW
+   ══════════════════════════════════════════════════════════════════════════ */
+async function renderSessions() {
+  const container = $('#sessions-list');
+  container.innerHTML = '<div class="loading">Loading sessions...</div>';
+  try {
+    const sessions = await fetchAPI('/api/sessions', { project: currentProject, limit: 50 });
+    if (!sessions.length) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">📁</div>
+          <p>No sessions found. Use <code>claude-memory process</code> to ingest session data.</p>
+        </div>`;
+      return;
+    }
+
+    container.innerHTML = sessions.map(s => `
+      <div class="card session-card" data-session-id="${escHtml(s.session_id)}">
+        <div class="session-header">
+          <span class="session-date">${formatDateTime(s.started_at)}</span>
+          ${s.git_branch ? `<span class="session-branch">🌿 ${escHtml(s.git_branch)}</span>` : ''}
+        </div>
+        <div class="session-meta">
+          <span>⏱ ${formatDuration(s.duration_minutes)}</span>
+          <span>💬 ${s.message_count} messages</span>
+          <span>👤 ${s.user_message_count} user / 🤖 ${s.assistant_message_count} assistant</span>
+          ${s.files_modified ? `<span>📄 ${s.files_modified.length} files</span>` : ''}
+        </div>
+        ${s.summary_text ? `<div class="session-summary">${escHtml(s.summary_text.substring(0, 300))}${s.summary_text.length > 300 ? '...' : ''}</div>` : ''}
+        ${s.key_topics && s.key_topics.length ? `
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+            ${s.key_topics.slice(0, 8).map(t => `<span class="tag-pill">${escHtml(t)}</span>`).join('')}
+          </div>` : ''}
+      </div>
+    `).join('');
+
+    // Click to navigate to timeline
+    container.querySelectorAll('.session-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const sid = card.dataset.sessionId;
+        const select = $('#timeline-session-select');
+        // Reset dropdown so it reloads
+        select.innerHTML = '<option value="">Select a session...</option>';
+        navigateTo('timeline');
+        // After navigation, set the session and render
+        setTimeout(async () => {
+          const sessions = await fetchAPI('/api/sessions', { project: currentProject, limit: 50 });
+          select.innerHTML = '<option value="">Select a session...</option>';
+          sessions.forEach(s => {
+            const date = formatDateTime(s.started_at);
+            const branch = s.git_branch ? ` (${s.git_branch})` : '';
+            const opt = document.createElement('option');
+            opt.value = s.session_id;
+            opt.textContent = `${date}${branch} — ${s.message_count} msgs`;
+            select.appendChild(opt);
+          });
+          select.value = sid;
+          renderTimeline();
+        }, 50);
+      });
+    });
+  } catch (e) {
+    container.innerHTML = `<div class="error-banner">${escHtml(e.message)}</div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   FOOTER STATS & PROJECT LOADING
+   ══════════════════════════════════════════════════════════════════════════ */
+async function loadFooterStats() {
+  try {
+    const stats = await fetchAPI('/api/stats');
+    $('#footer-memories').textContent = stats.total_memories + ' memories';
+    $('#footer-sessions').textContent = stats.total_sessions + ' sessions';
+  } catch (_) {
+    $('#footer-memories').textContent = '— memories';
+    $('#footer-sessions').textContent = '— sessions';
+  }
+}
+
+async function loadProjects() {
+  try {
+    const projects = await fetchAPI('/api/projects');
+    const select = $('#project-filter');
+    select.innerHTML = '<option value="">All Projects</option>';
+    projects.forEach(p => {
+      const name = p.project_path.split('/').filter(Boolean).pop() || p.project_path;
+      const opt = document.createElement('option');
+      opt.value = p.project_path;
+      opt.textContent = `${name} (${p.memory_count})`;
+      select.appendChild(opt);
+    });
+  } catch (_) { /* ignore */ }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   EVENT WIRING
+   ══════════════════════════════════════════════════════════════════════════ */
+function initEvents() {
+  // Navigation
+  $$('.nav-item').forEach(btn => {
+    btn.addEventListener('click', () => navigateTo(btn.dataset.view));
+  });
+
+  // Hash routing
+  window.addEventListener('hashchange', () => {
+    const hash = window.location.hash.replace('#', '') || 'search';
+    if (['search', 'browse', 'graph', 'stats', 'timeline', 'sessions'].includes(hash)) {
+      navigateTo(hash);
+    }
+  });
+
+  // Search input with debounce
+  const debouncedSearch = debounce(() => renderSearch(), 300);
+  $('#search-input').addEventListener('input', debouncedSearch);
+  $('#search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); renderSearch(); }
+  });
+
+  // Search type filter
+  $('#search-type-filter').addEventListener('change', () => {
+    if ($('#search-input').value.trim()) renderSearch();
+  });
+
+  // Browse type filter
+  $('#browse-type-filter').addEventListener('change', () => {
+    browseState.page = 0;
+    browseExpandedId = null;
+    renderBrowse();
+  });
+
+  // Project filter
+  $('#project-filter').addEventListener('change', () => {
+    currentProject = $('#project-filter').value;
+    // Reset timeline session select
+    $('#timeline-session-select').innerHTML = '<option value="">Select a session...</option>';
+    browseState.page = 0;
+    renderCurrentView();
+  });
+
+  // Timeline session select
+  $('#timeline-session-select').addEventListener('change', () => renderTimeline());
+
+  // Keyboard shortcut: / to focus search
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+      e.preventDefault();
+      navigateTo('search');
+      $('#search-input').focus();
+    }
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   INIT
+   ══════════════════════════════════════════════════════════════════════════ */
+function init() {
+  initEvents();
+
+  // Parse initial hash
+  const hash = window.location.hash.replace('#', '') || 'search';
+  if (['search', 'browse', 'graph', 'stats', 'timeline', 'sessions'].includes(hash)) {
+    navigateTo(hash);
+  } else {
+    navigateTo('search');
+  }
+
+  // Load initial data
+  loadFooterStats();
+  loadProjects();
+}
+
+// Boot
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+
+})();
+</script>
+</body>
+</html>
