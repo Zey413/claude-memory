@@ -82,7 +82,65 @@ This adds a `SessionEnd` hook to `~/.claude/settings.json` that automatically ex
 | `install-hook` | Install SessionEnd hook |
 | `uninstall-hook` | Remove SessionEnd hook |
 | `tag` | Manage memory tags |
+| `export` | Export memories to JSON |
+| `import-data` | Import memories from JSON |
+| `consolidate` | Dedup, score, archive stale memories |
+| `top` | Show top memories by importance score |
+| `diff` | Compare memories between sessions |
+| `watch` | Auto-ingest new sessions (daemon mode) |
+| `serve` | Start MCP server for real-time access |
 | `reset` | Reset database (destructive) |
+
+### Global Options
+
+| Option | Description |
+|--------|-------------|
+| `--json-output` | Machine-readable JSON output |
+| `-v, --verbose` | Enable debug logging |
+| `--db PATH` | Custom database path |
+
+## v0.3.0 Features
+
+### MCP Server Integration
+
+Claude Code can query memories in real-time during a session:
+
+```bash
+# Start the MCP server
+claude-memory serve
+
+# Or add to your Claude Code MCP config:
+# claude-memory-mcp (entry point)
+```
+
+Exposes 4 tools: `memory_search`, `memory_list`, `memory_stats`, `memory_context`.
+
+### Watch Mode (Auto-Ingestion)
+
+```bash
+# Watch for new sessions and auto-ingest
+claude-memory watch
+
+# Custom poll interval and project filter
+claude-memory watch --interval 10 --project /path/to/project
+```
+
+### Memory Consolidation
+
+```bash
+# Score, dedup, and archive stale memories
+claude-memory consolidate
+
+# Preview changes without applying
+claude-memory consolidate --dry-run
+
+# Show top memories by importance
+claude-memory top --limit 5
+```
+
+### Rich Terminal UI
+
+Beautiful output with tables, panels, and color-coded memory types powered by the `rich` library.
 
 ## Memory Types
 

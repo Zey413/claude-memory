@@ -11,17 +11,26 @@ import click
 
 from claude_memory import __version__
 from claude_memory.config import (
+    MemoryConfig,
     discover_projects,
     find_latest_session,
     find_session_files,
 )
 from claude_memory.db import MemoryDB
+from claude_memory.display import (
+    display_memory_table,
+    display_projects,
+    display_search_results,
+    display_sessions,
+    display_stats,
+)
 from claude_memory.extractor import MemoryExtractor
 from claude_memory.generator import ClaudemdGenerator
 from claude_memory.hooks import HookManager
 from claude_memory.models import Memory, MemoryType
 from claude_memory.parser import parse_session_file
 from claude_memory.search import MemorySearch
+from claude_memory.watcher import SessionWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -261,9 +270,7 @@ def search(ctx: click.Context, query: str, project: str | None,
             if not results:
                 click.echo("No memories found.")
                 return
-            click.echo(f"Found {len(results)} memories:\n")
-            for r in results:
-                _print_memory(r.memory, score=r.score)
+            display_search_results(results, query)
     except KeyboardInterrupt:
         click.echo("\nSearch interrupted.", err=True)
         sys.exit(130)
@@ -316,9 +323,7 @@ def list_memories(ctx: click.Context, project: str | None,
                 click.echo("No memories found.")
                 return
 
-            click.echo(f"Found {len(memories)} memories:\n")
-            for mem in memories:
-                _print_memory(mem)
+            display_memory_table(memories, title=f"Found {len(memories)} memories")
     finally:
         db.close()
 
@@ -364,20 +369,7 @@ def sessions(ctx: click.Context, project: str | None, limit: int) -> None:
                 click.echo("No sessions found.")
                 return
 
-            click.echo(f"Found {len(session_list)} sessions:\n")
-            for s in session_list:
-                date = s.started_at.strftime("%Y-%m-%d %H:%M")
-                date_str = click.style(date, dim=True)
-                duration = ""
-                if s.duration_minutes:
-                    from claude_memory.utils import format_duration
-                    duration = f" ({format_duration(s.duration_minutes)})"
-                branch = f" [{s.git_branch}]" if s.git_branch else ""
-                click.echo(f"  {s.session_id[:8]}... | {date_str}{duration}{branch}")
-                click.echo(f"    {s.summary_text}")
-                if s.key_topics:
-                    click.echo(f"    Topics: {', '.join(s.key_topics[:5])}")
-                click.echo()
+            display_sessions(session_list)
     finally:
         db.close()
 
@@ -448,34 +440,7 @@ def stats(ctx: click.Context) -> None:
         if json_mode:
             click.echo(json.dumps(s, indent=2, ensure_ascii=False))
         else:
-            click.echo("Claude Memory Statistics")
-            click.echo("=" * 40)
-            click.echo(f"Total memories:  {click.style(str(s['total_memories']), bold=True)}")
-            click.echo(f"Total sessions:  {click.style(str(s['total_sessions']), bold=True)}")
-            click.echo(f"Total tags:      {click.style(str(s['total_tags']), bold=True)}")
-
-            db_size = s["db_size_bytes"]
-            if db_size > 1_048_576:
-                size_str = f"{db_size / 1_048_576:.1f} MB"
-            elif db_size > 1024:
-                size_str = f"{db_size / 1024:.1f} KB"
-            else:
-                size_str = f"{db_size} B"
-            click.echo(f"Database size:   {click.style(size_str, bold=True)}")
-
-            if s["memories_by_type"]:
-                click.echo("\nBy type:")
-                for mtype, count in sorted(s["memories_by_type"].items()):
-                    color = TYPE_COLORS.get(mtype, "white")
-                    styled_type = click.style(mtype, fg=color)
-                    styled_count = click.style(str(count), bold=True)
-                    click.echo(f"  {styled_type:<30} {styled_count}")
-
-            if s["memories_by_project"]:
-                click.echo("\nBy project:")
-                for proj, count in sorted(s["memories_by_project"].items()):
-                    name = Path(proj).name if proj else "unknown"
-                    click.echo(f"  {name:<30} {click.style(str(count), bold=True)}")
+            display_stats(s)
     finally:
         db.close()
 
@@ -545,6 +510,232 @@ def tag(ctx: click.Context, memory_id: str, add: tuple, remove: tuple) -> None:
         db.close()
 
 
+# ── Serve (MCP) ──────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--transport", default="stdio", type=click.Choice(["stdio"]),
+              help="Transport type for MCP server (default: stdio)")
+@click.pass_context
+def serve(ctx: click.Context, transport: str) -> None:
+    """Start the MCP server for real-time memory access.
+
+    Launches a Model Context Protocol server that exposes memory
+    search, listing, stats, and context generation as MCP tools.
+
+    \b
+    Examples:
+        claude-memory serve
+        claude-memory serve --transport stdio
+    """
+    try:
+        from claude_memory.mcp_server import init_db
+        from claude_memory.mcp_server import mcp as mcp_server
+    except ImportError:
+        click.echo(
+            "Error: MCP dependencies not installed.\n"
+            "Install with: pip install 'claude-memory[mcp]'",
+            err=True,
+        )
+        sys.exit(1)
+
+    db_path = ctx.obj.get("db_path") if ctx.obj else None
+    init_db(db_path)
+    mcp_server.run(transport=transport)
+
+
+# ── Consolidate ──────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option('--project', default=None, help='Filter by project path')
+@click.option('--dry-run', is_flag=True, help='Show what would be done without doing it')
+@click.pass_context
+def consolidate(ctx, project, dry_run):
+    """Consolidate memories: dedup, score, archive stale TODOs."""
+    from claude_memory.consolidator import MemoryConsolidator
+
+    db = _get_db(ctx)
+    json_mode = _is_json_mode(ctx)
+    try:
+        consolidator = MemoryConsolidator(db)
+        project_path = _resolve_project(project) if project else None
+
+        if dry_run:
+            # Score first so find_duplicates has scores to work with
+            scored = consolidator.score_memories(project_path)
+            pairs = consolidator.find_duplicates(project_path)
+            # Count stale TODOs without archiving
+            from datetime import datetime, timezone
+            all_mems = db.get_all_memories(project_path)
+            now = datetime.now(timezone.utc)
+            stale_count = sum(
+                1 for m in all_mems
+                if m.memory_type == MemoryType.TODO
+                and (now - m.created_at).total_seconds() / 86400.0 > 30
+            )
+            click.echo("Dry run — no changes made:")
+            click.echo(f"  Memories to score:     {scored}")
+            click.echo(f"  Duplicates found:      {len(pairs)}")
+            click.echo(f"  Stale TODOs to archive: {stale_count}")
+            if pairs:
+                click.echo("\n  Duplicate pairs:")
+                for keep, remove in pairs:
+                    click.echo(f"    KEEP: [{keep.memory_type.value}] {keep.title}")
+                    click.echo(f"    DROP: [{remove.memory_type.value}] {remove.title}")
+                    click.echo()
+        else:
+            report = consolidator.consolidate(project_path)
+            if json_mode:
+                click.echo(json.dumps(report.model_dump(), indent=2, ensure_ascii=False))
+            else:
+                click.echo("Consolidation complete:")
+                click.echo(f"  Memories scored:    {report.memories_scored}")
+                click.echo(f"  Duplicates found:   {report.duplicates_found}")
+                click.echo(f"  Duplicates merged:  {report.duplicates_merged}")
+                click.echo(f"  TODOs archived:     {report.todos_archived}")
+                if report.top_memories:
+                    click.echo("\n  Top memories:")
+                    for tm in report.top_memories:
+                        click.echo(f"    [{tm['type']}] {tm['title']} (score: {tm['score']:.3f})")
+    finally:
+        db.close()
+
+
+# ── Top ──────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option('--project', default=None, help='Filter by project path')
+@click.option('--limit', default=10, help='Number of top memories to show')
+@click.pass_context
+def top(ctx, project, limit):
+    """Show top memories by importance score."""
+    db = _get_db(ctx)
+    json_mode = _is_json_mode(ctx)
+    try:
+        project_path = _resolve_project(project) if project else None
+        memories = db.get_top_memories(project_path=project_path, limit=limit)
+
+        if not memories:
+            click.echo("No memories found. Run 'consolidate' first to score memories.")
+            return
+
+        if json_mode:
+            output = [
+                {
+                    **_memory_to_dict(m),
+                    "importance_score": db.get_importance_score(m.id),
+                }
+                for m in memories
+            ]
+            click.echo(json.dumps(output, indent=2, ensure_ascii=False))
+        else:
+            click.echo(f"Top {len(memories)} memories by importance:\n")
+            for i, mem in enumerate(memories, 1):
+                score = db.get_importance_score(mem.id)
+                icon = TYPE_ICONS.get(mem.memory_type.value, "📌")
+                color = TYPE_COLORS.get(mem.memory_type.value, "white")
+                type_label = click.style(f"[{mem.memory_type.value}]", fg=color)
+                click.echo(f"  {i}. {icon} {type_label} {mem.title} (score: {score:.3f})")
+                if mem.tags:
+                    click.echo(f"     Tags: {', '.join(mem.tags)}")
+                click.echo()
+    finally:
+        db.close()
+
+
+# ── Diff ─────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument('session_id_1')
+@click.argument('session_id_2', required=False, default=None)
+@click.pass_context
+def diff(ctx, session_id_1, session_id_2):
+    """Show differences between two sessions (or latest vs session)."""
+    db = _get_db(ctx)
+    try:
+        session1 = db.get_session(session_id_1)
+        if session1 is None:
+            # Try prefix match
+            all_sessions = db.get_recent_sessions(limit=100)
+            matches = [s for s in all_sessions if s.session_id.startswith(session_id_1)]
+            if matches:
+                session1 = matches[0]
+            else:
+                click.echo(f"Session {session_id_1} not found.", err=True)
+                sys.exit(1)
+
+        if session_id_2:
+            session2 = db.get_session(session_id_2)
+            if session2 is None:
+                all_sessions = db.get_recent_sessions(limit=100)
+                matches = [s for s in all_sessions if s.session_id.startswith(session_id_2)]
+                if matches:
+                    session2 = matches[0]
+                else:
+                    click.echo(f"Session {session_id_2} not found.", err=True)
+                    sys.exit(1)
+        else:
+            # Use latest session as session2
+            recent = db.get_recent_sessions(limit=2)
+            if len(recent) < 2:
+                click.echo("Need at least two sessions to diff.", err=True)
+                sys.exit(1)
+            session2 = recent[0] if recent[0].session_id != session1.session_id else recent[1]
+
+        # Get memories for each session
+        all_mems = db.get_all_memories()
+        mems1 = [m for m in all_mems if m.session_id == session1.session_id]
+        mems2 = [m for m in all_mems if m.session_id == session2.session_id]
+
+        date1 = session1.started_at.strftime('%Y-%m-%d')
+        sid1 = session1.session_id[:8]
+        click.echo(f"Session A: {sid1}... ({date1})")
+        click.echo(f"  Summary: {session1.summary_text or 'N/A'}")
+        click.echo(f"  Memories: {len(mems1)}")
+        click.echo()
+
+        date2 = session2.started_at.strftime('%Y-%m-%d')
+        sid2 = session2.session_id[:8]
+        click.echo(f"Session B: {sid2}... ({date2})")
+        click.echo(f"  Summary: {session2.summary_text or 'N/A'}")
+        click.echo(f"  Memories: {len(mems2)}")
+        click.echo()
+
+        # Show types breakdown
+        types1 = {}
+        for m in mems1:
+            types1[m.memory_type.value] = types1.get(m.memory_type.value, 0) + 1
+        types2 = {}
+        for m in mems2:
+            types2[m.memory_type.value] = types2.get(m.memory_type.value, 0) + 1
+
+        all_types = sorted(set(list(types1.keys()) + list(types2.keys())))
+        if all_types:
+            click.echo("Memory types comparison:")
+            click.echo(f"  {'Type':<15} {'Session A':>10} {'Session B':>10}")
+            click.echo(f"  {'-'*15} {'-'*10} {'-'*10}")
+            for t in all_types:
+                a = types1.get(t, 0)
+                b = types2.get(t, 0)
+                click.echo(f"  {t:<15} {a:>10} {b:>10}")
+            click.echo()
+
+        # Show unique topics
+        topics1 = set(session1.key_topics) if session1.key_topics else set()
+        topics2 = set(session2.key_topics) if session2.key_topics else set()
+        only_a = topics1 - topics2
+        only_b = topics2 - topics1
+        common = topics1 & topics2
+
+        if common:
+            click.echo(f"Common topics: {', '.join(common)}")
+        if only_a:
+            click.echo(f"Only in A: {', '.join(only_a)}")
+        if only_b:
+            click.echo(f"Only in B: {', '.join(only_b)}")
+    finally:
+        db.close()
+
+
 # ── Reset ─────────────────────────────────────────────────────────────────────
 
 @cli.command()
@@ -585,12 +776,7 @@ def projects(ctx: click.Context) -> None:
             click.echo("No projects found with Claude session data.")
             return
 
-        click.echo(f"Found {len(found)} projects:\n")
-        for decoded_path, claude_dir in found:
-            jsonl_count = len(list(claude_dir.glob("*.jsonl")))
-            click.echo(f"  {decoded_path}")
-            click.echo(f"    Sessions: {jsonl_count}")
-            click.echo()
+        display_projects(found)
 
 
 # ── Export ────────────────────────────────────────────────────────────────────
@@ -707,6 +893,60 @@ def import_data(ctx: click.Context, input_path: str, skip_duplicates: bool) -> N
 
         click.echo(f"{imported} imported, {skipped} skipped, {errors} errors")
     finally:
+        db.close()
+
+
+# ── Watch ────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--interval", default=5.0, help="Poll interval in seconds")
+@click.option("--project", default=None, help="Watch specific project only")
+@click.option("--no-generate", is_flag=True, help="Skip auto-generating CLAUDE.md")
+@click.pass_context
+def watch(ctx: click.Context, interval: float, project: str | None,
+          no_generate: bool) -> None:
+    """Watch for new sessions and auto-ingest memories.
+
+    Monitors ~/.claude/projects/ for new or modified JSONL session files
+    and automatically ingests them through the memory extraction pipeline.
+
+    \b
+    Examples:
+        claude-memory watch
+        claude-memory watch --interval 10
+        claude-memory watch --project /path/to/project
+        claude-memory watch --no-generate
+    """
+    db = _get_db(ctx)
+    config = MemoryConfig()
+    if ctx.obj.get("db_path"):
+        config.db_path = ctx.obj["db_path"]
+
+    project_filter = str(Path(project).resolve()) if project else None
+
+    watcher = SessionWatcher(
+        db=db,
+        config=config,
+        interval=interval,
+        auto_generate=not no_generate,
+        project_filter=project_filter,
+    )
+
+    watch_target = project_filter or str(watcher.watch_dir)
+    click.echo(f"Watching for new sessions in: {watch_target}")
+    click.echo(f"Poll interval: {interval}s | Auto-generate: {not no_generate}")
+    click.echo("Press Ctrl+C to stop.\n")
+
+    try:
+        watcher.start()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        summary = watcher.summary()
+        click.echo("\nWatch summary:")
+        click.echo(f"  Files processed:    {summary['files_processed']}")
+        click.echo(f"  Memories extracted: {summary['memories_extracted']}")
+        click.echo(f"  Errors:             {summary['errors']}")
         db.close()
 
 

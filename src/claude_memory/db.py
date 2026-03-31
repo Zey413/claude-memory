@@ -22,6 +22,9 @@ _LOCKED_SLEEP = 0.1
 # ── Schema Migrations ────────────────────────────────────────────────────────
 
 MIGRATIONS: dict[int, list[str]] = {
+    2: [
+        "ALTER TABLE memories ADD COLUMN importance_score REAL DEFAULT 0.0",
+    ],
     1: [
         # Core memories table
         """CREATE TABLE IF NOT EXISTS memories (
@@ -313,6 +316,26 @@ class MemoryDB:
             row = self._execute("SELECT COUNT(*) FROM memories").fetchone()
         return row[0] if row else 0
 
+    def get_all_memories(
+        self,
+        project_path: str | None = None,
+        limit: int = 10000,
+    ) -> list[Memory]:
+        """Get all memories, optionally filtered by project."""
+        if project_path:
+            rows = self._execute(
+                """SELECT * FROM memories
+                   WHERE project_path = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (project_path, limit),
+            ).fetchall()
+        else:
+            rows = self._execute(
+                "SELECT * FROM memories ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
     # ── Session CRUD ──────────────────────────────────────────────────────
 
     def insert_session(self, summary: SessionSummary) -> str:
@@ -514,6 +537,54 @@ class MemoryDB:
         if end < len(content):
             snippet = snippet + "..."
         return snippet
+
+    # ── Importance Score ─────────────────────────────────────────────────
+
+    def update_importance_score(self, memory_id: str, score: float) -> None:
+        """Update the importance score for a memory."""
+        self._execute(
+            "UPDATE memories SET importance_score = ? WHERE id = ?",
+            (score, memory_id),
+            commit=True,
+        )
+
+    def update_memory_type(self, memory_id: str, memory_type: MemoryType) -> None:
+        """Update the type of a memory (e.g., for archiving TODOs to context)."""
+        self._execute(
+            "UPDATE memories SET memory_type = ?, updated_at = ? WHERE id = ?",
+            (memory_type.value, iso_now(), memory_id),
+            commit=True,
+        )
+
+    def get_top_memories(
+        self,
+        project_path: str | None = None,
+        limit: int = 10,
+    ) -> list[Memory]:
+        """Get top memories sorted by importance score (descending)."""
+        if project_path:
+            rows = self._execute(
+                """SELECT * FROM memories
+                   WHERE project_path = ?
+                   ORDER BY importance_score DESC LIMIT ?""",
+                (project_path, limit),
+            ).fetchall()
+        else:
+            rows = self._execute(
+                "SELECT * FROM memories ORDER BY importance_score DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def get_importance_score(self, memory_id: str) -> float:
+        """Get the importance score for a memory."""
+        row = self._execute(
+            "SELECT importance_score FROM memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return 0.0
+        return row["importance_score"] or 0.0
 
     # ── Stats ─────────────────────────────────────────────────────────────
 
