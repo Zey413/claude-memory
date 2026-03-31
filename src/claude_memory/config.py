@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Default paths
@@ -35,8 +38,16 @@ class MemoryConfig:
         return self.claude_home / "settings.json"
 
     def ensure_dirs(self) -> None:
-        """Create necessary directories if they don't exist."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        """Create necessary directories if they don't exist.
+
+        Handles PermissionError and missing parent directories gracefully.
+        """
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            logger.error("Permission denied creating directory: %s", self.db_path.parent)
+        except OSError as exc:
+            logger.error("Could not create directory %s: %s", self.db_path.parent, exc)
 
 
 def project_path_to_claude_dir(project_path: str, config: MemoryConfig | None = None) -> Path:
@@ -65,6 +76,8 @@ def discover_projects(config: MemoryConfig | None = None) -> list[tuple[str, Pat
 
     Returns:
         List of (decoded_project_path, claude_project_dir) tuples.
+
+    Handles missing ~/.claude directory and PermissionError on listing.
     """
     cfg = config or MemoryConfig()
     projects = []
@@ -72,7 +85,16 @@ def discover_projects(config: MemoryConfig | None = None) -> list[tuple[str, Pat
     if not cfg.projects_dir.exists():
         return projects
 
-    for entry in cfg.projects_dir.iterdir():
+    try:
+        entries = list(cfg.projects_dir.iterdir())
+    except PermissionError:
+        logger.warning("Permission denied reading %s", cfg.projects_dir)
+        return projects
+    except OSError as exc:
+        logger.warning("Could not read %s: %s", cfg.projects_dir, exc)
+        return projects
+
+    for entry in entries:
         if entry.is_dir() and entry.name.startswith("-"):
             # Decode: -Users-foo-Desktop-myproject → /Users/foo/Desktop/myproject
             decoded = entry.name.replace("-", "/", 1)  # Fix leading dash
@@ -92,16 +114,24 @@ def find_session_files(project_path: str, config: MemoryConfig | None = None) ->
 
     Returns:
         List of Path objects to .jsonl session files, newest first.
+        Returns empty list if the directory doesn't exist or can't be read.
     """
     claude_dir = project_path_to_claude_dir(project_path, config)
     if not claude_dir.exists():
         return []
 
-    jsonl_files = sorted(
-        claude_dir.glob("*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    try:
+        jsonl_files = sorted(
+            claude_dir.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except PermissionError:
+        logger.warning("Permission denied reading session files in %s", claude_dir)
+        return []
+    except OSError as exc:
+        logger.warning("Could not read session files in %s: %s", claude_dir, exc)
+        return []
     return jsonl_files
 
 

@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from pathlib import Path
 
 from claude_memory.config import MemoryConfig
 from claude_memory.models import Memory, MemoryType, SearchResult, SessionSummary, Tag
 from claude_memory.utils import iso_now, parse_iso
+
+logger = logging.getLogger(__name__)
+
+# Retry configuration for "database is locked" errors
+_LOCKED_RETRIES = 3
+_LOCKED_SLEEP = 0.1
 
 
 # ── Schema Migrations ────────────────────────────────────────────────────────
@@ -93,8 +101,8 @@ class MemoryDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        self._execute("PRAGMA journal_mode=WAL")
+        self._execute("PRAGMA foreign_keys=ON")
         self._migrate()
 
     def close(self) -> None:
@@ -107,12 +115,43 @@ class MemoryDB:
     def __exit__(self, *args):
         self.close()
 
+    # ── Execute helper with retry ────────────────────────────────────────
+
+    def _execute(
+        self, sql: str, params: tuple | list = (),
+        *, commit: bool = False,
+    ) -> sqlite3.Cursor:
+        """Execute a SQL statement with retry logic for 'database is locked'.
+
+        Wraps cursor.execute with automatic retry on sqlite3.OperationalError
+        when the database is locked. Other OperationalErrors are re-raised.
+        """
+        last_err: Exception | None = None
+        for attempt in range(_LOCKED_RETRIES):
+            try:
+                cursor = self.conn.execute(sql, params)
+                if commit:
+                    self.conn.commit()
+                return cursor
+            except sqlite3.OperationalError as exc:
+                if "database is locked" in str(exc).lower():
+                    last_err = exc
+                    logger.warning(
+                        "Database locked (attempt %d/%d), retrying in %.1fs...",
+                        attempt + 1, _LOCKED_RETRIES, _LOCKED_SLEEP,
+                    )
+                    time.sleep(_LOCKED_SLEEP)
+                else:
+                    raise
+        # All retries exhausted
+        raise last_err  # type: ignore[misc]
+
     # ── Migration ─────────────────────────────────────────────────────────
 
     def _get_version(self) -> int:
         """Get current schema version."""
         try:
-            row = self.conn.execute(
+            row = self._execute(
                 "SELECT MAX(version) FROM schema_version"
             ).fetchone()
             return row[0] if row and row[0] is not None else 0
@@ -120,63 +159,80 @@ class MemoryDB:
             return 0
 
     def _migrate(self) -> None:
-        """Apply pending migrations."""
+        """Apply pending migrations with transaction rollback on failure."""
         current = self._get_version()
         for ver in sorted(MIGRATIONS):
             if ver > current:
-                for sql in MIGRATIONS[ver]:
-                    self.conn.execute(sql)
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (ver, iso_now()),
-                )
-        self.conn.commit()
+                try:
+                    for sql in MIGRATIONS[ver]:
+                        self._execute(sql)
+                    self._execute(
+                        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                        (ver, iso_now()),
+                    )
+                    self.conn.commit()
+                except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+                    logger.error("Migration to version %d failed: %s — rolling back", ver, exc)
+                    self.conn.rollback()
+                    raise
 
     # ── Memory CRUD ───────────────────────────────────────────────────────
 
     def insert_memory(self, memory: Memory) -> str:
-        """Insert a memory and update FTS index. Returns the memory ID."""
-        self.conn.execute(
-            """INSERT INTO memories
-               (id, session_id, project_path, memory_type, title, content,
-                confidence, source_line_start, source_line_end, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                memory.id,
-                memory.session_id,
-                memory.project_path,
-                memory.memory_type.value,
-                memory.title,
-                memory.content,
-                memory.confidence,
-                memory.source_line_start,
-                memory.source_line_end,
-                memory.created_at.isoformat(),
-                memory.updated_at.isoformat(),
-            ),
-        )
-        # Update FTS
-        rowid = self.conn.execute(
-            "SELECT rowid FROM memories WHERE id = ?", (memory.id,)
-        ).fetchone()[0]
-        tags_str = " ".join(memory.tags)
-        self.conn.execute(
-            "INSERT INTO memories_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)",
-            (rowid, memory.title, memory.content, tags_str),
-        )
-        # Insert tags
-        for tag in memory.tags:
-            self._ensure_tag(tag)
-            self.conn.execute(
-                "INSERT OR IGNORE INTO memory_tags (memory_id, tag_name) VALUES (?, ?)",
-                (memory.id, tag),
+        """Insert a memory and update FTS index. Returns the memory ID.
+
+        Handles IntegrityError (duplicate ID) and OperationalError gracefully.
+        """
+        try:
+            self._execute(
+                """INSERT INTO memories
+                   (id, session_id, project_path, memory_type, title, content,
+                    confidence, source_line_start, source_line_end, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    memory.id,
+                    memory.session_id,
+                    memory.project_path,
+                    memory.memory_type.value,
+                    memory.title,
+                    memory.content,
+                    memory.confidence,
+                    memory.source_line_start,
+                    memory.source_line_end,
+                    memory.created_at.isoformat(),
+                    memory.updated_at.isoformat(),
+                ),
             )
-        self.conn.commit()
-        return memory.id
+            # Update FTS
+            rowid = self._execute(
+                "SELECT rowid FROM memories WHERE id = ?", (memory.id,)
+            ).fetchone()[0]
+            tags_str = " ".join(memory.tags)
+            self._execute(
+                "INSERT INTO memories_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)",
+                (rowid, memory.title, memory.content, tags_str),
+            )
+            # Insert tags
+            for tag in memory.tags:
+                self._ensure_tag(tag)
+                self._execute(
+                    "INSERT OR IGNORE INTO memory_tags (memory_id, tag_name) VALUES (?, ?)",
+                    (memory.id, tag),
+                )
+            self.conn.commit()
+            return memory.id
+        except sqlite3.IntegrityError as exc:
+            self.conn.rollback()
+            logger.warning("Duplicate memory %s, skipping: %s", memory.id, exc)
+            return memory.id
+        except sqlite3.OperationalError as exc:
+            self.conn.rollback()
+            logger.error("Failed to insert memory %s: %s", memory.id, exc)
+            raise
 
     def get_memory(self, memory_id: str) -> Memory | None:
         """Get a memory by ID."""
-        row = self.conn.execute(
+        row = self._execute(
             "SELECT * FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
         if not row:
@@ -190,7 +246,7 @@ class MemoryDB:
         limit: int = 50,
     ) -> list[Memory]:
         """Get memories filtered by type and project."""
-        rows = self.conn.execute(
+        rows = self._execute(
             """SELECT * FROM memories
                WHERE project_path = ? AND memory_type = ?
                ORDER BY created_at DESC LIMIT ?""",
@@ -204,7 +260,7 @@ class MemoryDB:
         limit: int = 100,
     ) -> list[Memory]:
         """Get all memories for a project."""
-        rows = self.conn.execute(
+        rows = self._execute(
             """SELECT * FROM memories
                WHERE project_path = ?
                ORDER BY created_at DESC LIMIT ?""",
@@ -227,41 +283,41 @@ class MemoryDB:
             params.append(project_path)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        rows = self.conn.execute(sql, params).fetchall()
+        rows = self._execute(sql, params).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
         # Remove FTS entry first
-        row = self.conn.execute(
+        row = self._execute(
             "SELECT rowid FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
         if row:
-            self.conn.execute(
+            self._execute(
                 "INSERT INTO memories_fts (memories_fts, rowid, title, content, tags) "
                 "VALUES ('delete', ?, '', '', '')",
                 (row[0],),
             )
-        cursor = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        cursor = self._execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self.conn.commit()
         return cursor.rowcount > 0
 
     def count_memories(self, project_path: str | None = None) -> int:
         """Count total memories, optionally by project."""
         if project_path:
-            row = self.conn.execute(
+            row = self._execute(
                 "SELECT COUNT(*) FROM memories WHERE project_path = ?",
                 (project_path,),
             ).fetchone()
         else:
-            row = self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()
+            row = self._execute("SELECT COUNT(*) FROM memories").fetchone()
         return row[0] if row else 0
 
     # ── Session CRUD ──────────────────────────────────────────────────────
 
     def insert_session(self, summary: SessionSummary) -> str:
         """Insert or update a session summary."""
-        self.conn.execute(
+        self._execute(
             """INSERT OR REPLACE INTO sessions
                (session_id, project_path, git_branch, started_at, ended_at,
                 duration_minutes, message_count, user_message_count,
@@ -291,7 +347,7 @@ class MemoryDB:
 
     def get_session(self, session_id: str) -> SessionSummary | None:
         """Get a session summary by ID."""
-        row = self.conn.execute(
+        row = self._execute(
             "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
         if not row:
@@ -305,14 +361,14 @@ class MemoryDB:
     ) -> list[SessionSummary]:
         """Get recent sessions, optionally filtered by project."""
         if project_path:
-            rows = self.conn.execute(
+            rows = self._execute(
                 """SELECT * FROM sessions
                    WHERE project_path = ?
                    ORDER BY started_at DESC LIMIT ?""",
                 (project_path, limit),
             ).fetchall()
         else:
-            rows = self.conn.execute(
+            rows = self._execute(
                 "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -320,7 +376,7 @@ class MemoryDB:
 
     def is_session_processed(self, session_id: str) -> bool:
         """Check if a session has already been processed."""
-        row = self.conn.execute(
+        row = self._execute(
             "SELECT processed_at FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -329,19 +385,19 @@ class MemoryDB:
     def count_sessions(self, project_path: str | None = None) -> int:
         """Count total sessions."""
         if project_path:
-            row = self.conn.execute(
+            row = self._execute(
                 "SELECT COUNT(*) FROM sessions WHERE project_path = ?",
                 (project_path,),
             ).fetchone()
         else:
-            row = self.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+            row = self._execute("SELECT COUNT(*) FROM sessions").fetchone()
         return row[0] if row else 0
 
     # ── Tag Operations ────────────────────────────────────────────────────
 
     def _ensure_tag(self, name: str) -> None:
         """Create tag if it doesn't exist, update if it does."""
-        self.conn.execute(
+        self._execute(
             """INSERT INTO tags (name, count, last_used)
                VALUES (?, 1, ?)
                ON CONFLICT(name) DO UPDATE SET
@@ -352,7 +408,7 @@ class MemoryDB:
 
     def get_all_tags(self) -> list[Tag]:
         """Get all tags sorted by count."""
-        rows = self.conn.execute(
+        rows = self._execute(
             "SELECT * FROM tags ORDER BY count DESC"
         ).fetchall()
         return [
@@ -363,7 +419,7 @@ class MemoryDB:
     def add_tag_to_memory(self, memory_id: str, tag_name: str) -> None:
         """Add a tag to a memory."""
         self._ensure_tag(tag_name)
-        self.conn.execute(
+        self._execute(
             "INSERT OR IGNORE INTO memory_tags (memory_id, tag_name) VALUES (?, ?)",
             (memory_id, tag_name),
         )
@@ -371,7 +427,7 @@ class MemoryDB:
 
     def remove_tag_from_memory(self, memory_id: str, tag_name: str) -> None:
         """Remove a tag from a memory."""
-        self.conn.execute(
+        self._execute(
             "DELETE FROM memory_tags WHERE memory_id = ? AND tag_name = ?",
             (memory_id, tag_name),
         )
@@ -386,7 +442,10 @@ class MemoryDB:
         memory_type: MemoryType | None = None,
         limit: int = 20,
     ) -> list[SearchResult]:
-        """Full-text search over memories with BM25 ranking."""
+        """Full-text search over memories with BM25 ranking.
+
+        Returns an empty list if the FTS query is malformed or empty.
+        """
         fts_query = self._prepare_fts_query(query)
 
         sql = """
@@ -407,7 +466,13 @@ class MemoryDB:
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
 
-        rows = self.conn.execute(sql, params).fetchall()
+        try:
+            rows = self._execute(sql, params).fetchall()
+        except sqlite3.OperationalError as exc:
+            # Malformed FTS query (unbalanced quotes, bad syntax, etc.)
+            logger.warning("FTS query failed for %r: %s — returning empty results", query, exc)
+            return []
+
         results = []
         for row in rows:
             memory = self._row_to_memory(row)
@@ -454,18 +519,18 @@ class MemoryDB:
 
     def get_stats(self) -> dict:
         """Get overall system statistics."""
-        total_memories = self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-        total_sessions = self.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        total_tags = self.conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
+        total_memories = self._execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        total_sessions = self._execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        total_tags = self._execute("SELECT COUNT(*) FROM tags").fetchone()[0]
 
         type_counts = {}
-        for row in self.conn.execute(
+        for row in self._execute(
             "SELECT memory_type, COUNT(*) as cnt FROM memories GROUP BY memory_type"
         ).fetchall():
             type_counts[row["memory_type"]] = row["cnt"]
 
         project_counts = {}
-        for row in self.conn.execute(
+        for row in self._execute(
             "SELECT project_path, COUNT(*) as cnt FROM memories GROUP BY project_path"
         ).fetchall():
             project_counts[row["project_path"]] = row["cnt"]
@@ -485,12 +550,12 @@ class MemoryDB:
 
     def reset(self) -> None:
         """Drop all data and recreate schema."""
-        self.conn.execute("DROP TABLE IF EXISTS memory_tags")
-        self.conn.execute("DROP TABLE IF EXISTS tags")
-        self.conn.execute("DROP TABLE IF EXISTS memories_fts")
-        self.conn.execute("DROP TABLE IF EXISTS memories")
-        self.conn.execute("DROP TABLE IF EXISTS sessions")
-        self.conn.execute("DROP TABLE IF EXISTS schema_version")
+        self._execute("DROP TABLE IF EXISTS memory_tags")
+        self._execute("DROP TABLE IF EXISTS tags")
+        self._execute("DROP TABLE IF EXISTS memories_fts")
+        self._execute("DROP TABLE IF EXISTS memories")
+        self._execute("DROP TABLE IF EXISTS sessions")
+        self._execute("DROP TABLE IF EXISTS schema_version")
         self.conn.commit()
         self._migrate()
 
@@ -499,7 +564,7 @@ class MemoryDB:
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         """Convert a database row to a Memory object."""
         # Get tags for this memory
-        tag_rows = self.conn.execute(
+        tag_rows = self._execute(
             "SELECT tag_name FROM memory_tags WHERE memory_id = ?",
             (row["id"],),
         ).fetchall()

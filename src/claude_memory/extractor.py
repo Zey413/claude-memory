@@ -54,8 +54,22 @@ _DECISION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:let'?s|let us)\s+(use|go with|implement|create|switch to|try)\s+(.+)", re.I),
     re.compile(r"(?:decided? to|choosing|going to)\s+(.+)", re.I),
     re.compile(r"instead of\s+(.+?),\s+(?:we|i)(?:'ll)?\s+(.+)", re.I),
-    re.compile(r"the\s+(?:best|right|better|correct)\s+(?:approach|choice|option|way|solution)\s+(?:is|would be)\s+(.+)", re.I),
+    re.compile(
+        r"the\s+(?:best|right|better|correct)\s+(?:approach|choice|option|way|solution)"
+        r"\s+(?:is|would be)\s+(.+)", re.I,
+    ),
     re.compile(r"(?:we|i)\s+should\s+(?:use|go with|implement|create|adopt)\s+(.+)", re.I),
+    re.compile(r"the\s+approach\s+is\s+(.+)", re.I),
+    re.compile(r"we'?ll\s+go\s+with\s+(.+)", re.I),
+    re.compile(r"the\s+plan\s+is\s+(.+)", re.I),
+    re.compile(r"i'?m\s+going\s+to\s+implement\s+(.+)", re.I),
+]
+
+# Question prefixes that disqualify a line from being a decision
+_QUESTION_PREFIXES: list[re.Pattern[str]] = [
+    re.compile(r"^\s*should\s+we\b", re.I),
+    re.compile(r"^\s*shall\s+we\b", re.I),
+    re.compile(r"^\s*can\s+we\b", re.I),
 ]
 
 # Preference patterns
@@ -66,6 +80,10 @@ _PREFERENCE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"please\s+(?:always\s+)?use\s+(.+)", re.I),
     re.compile(r"switch\s+to\s+(.+)", re.I),
     re.compile(r"i\s+(?:like|want)\s+(?:to\s+use\s+)?(.+?)(?:\s+instead| better| more)", re.I),
+    re.compile(r"my\s+preference\s+is\s+(.+)", re.I),
+    re.compile(r"i'?d\s+rather\s+(.+)", re.I),
+    re.compile(r"can\s+we\s+use\s+(.+)", re.I),
+    re.compile(r"instead\s+of\s+using\s+(.+)", re.I),
 ]
 
 # TODO / future-work patterns
@@ -90,10 +108,34 @@ _ERROR_INDICATORS: list[re.Pattern[str]] = [
     re.compile(r"\bsyntax error\b", re.I),
     re.compile(r"\bexit code [1-9]\d*\b", re.I),
     re.compile(r"\bnon-zero exit\b", re.I),
+    re.compile(r"\bconnection refused\b", re.I),
+    re.compile(r"\btimeout\b", re.I),
+    re.compile(r"\bWARN\b"),
+    re.compile(r"\bDEPRECAT", re.I),
+    re.compile(r"\bsegfault\b", re.I),
+    re.compile(r"\bkilled\b", re.I),
+    re.compile(r"\bOOM\b"),
 ]
 
 # Word tokenisation
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*")
+
+# Learning patterns (assistant messages)
+_LEARNING_PATTERNS_ASSISTANT: list[re.Pattern[str]] = [
+    re.compile(r"turns\s+out\s+(.+)", re.I),
+    re.compile(r"the\s+trick\s+is\s+(.+)", re.I),
+    re.compile(r"key\s+insight\s*[:\-]?\s*(.+)", re.I),
+    re.compile(r"important\s+to\s+note\s+(.+)", re.I),
+    re.compile(r"the\s+reason\s+is\s+(.+)", re.I),
+]
+
+# Learning patterns (user messages)
+_LEARNING_PATTERNS_USER: list[re.Pattern[str]] = [
+    re.compile(r"\bTIL\b[:\s]*(.+)", re.I),
+    re.compile(r"I\s+learned\s+(.+)", re.I),
+    re.compile(r"now\s+I\s+understand\s+(.+)", re.I),
+    re.compile(r"good\s+to\s+know\s+(.+)", re.I),
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +192,7 @@ class MemoryExtractor:
     """Extracts structured memories from parsed Claude Code session messages."""
 
     # Number of messages to look ahead when searching for a fix after an error
-    ERROR_FIX_LOOKAHEAD = 5
+    ERROR_FIX_LOOKAHEAD = 10
 
     # ----- public interface ------------------------------------------------ #
 
@@ -167,6 +209,7 @@ class MemoryExtractor:
         memories.extend(self._extract_todos(messages, session_id, project_path))
         memories.extend(self._extract_errors_and_fixes(messages, session_id, project_path))
         memories.extend(self._extract_preferences(messages, session_id, project_path))
+        memories.extend(self._extract_learnings(messages, session_id, project_path))
         return self._deduplicate(memories)
 
     def generate_summary(
@@ -244,7 +287,12 @@ class MemoryExtractor:
             session_id=session_id,
             project_path=project_path,
             git_branch=git_branch,
-            started_at=started_at or ended_at or __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            started_at=(
+                started_at or ended_at
+                or __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                )
+            ),
             ended_at=ended_at,
             duration_minutes=duration_minutes,
             message_count=len(messages),
@@ -272,8 +320,15 @@ class MemoryExtractor:
                 continue
             for pattern in _DECISION_PATTERNS:
                 for match in pattern.finditer(msg.text_content):
+                    matched_line = match.group(0).strip()
+                    # Filter out questions: skip if line ends with "?"
+                    if matched_line.rstrip().endswith("?"):
+                        continue
+                    # Filter out question prefixes
+                    if any(qp.match(matched_line) for qp in _QUESTION_PREFIXES):
+                        continue
                     context = _sentence_around_match(msg.text_content, match)
-                    title = truncate(match.group(0))
+                    title = truncate(matched_line)
                     memories.append(Memory(
                         session_id=session_id,
                         project_path=project_path,
@@ -416,7 +471,14 @@ class MemoryExtractor:
                 has_fix_tool = any(
                     tu.name in ("Bash", "Edit", "Write") for tu in candidate.tool_uses
                 )
-                if has_fix_tool and not _has_error(candidate.text_content):
+                if not has_fix_tool:
+                    continue
+                # For Bash tools, check if the output looks successful
+                # (no error keywords and possibly exit code 0)
+                bash_tools = [tu for tu in candidate.tool_uses if tu.name == "Bash"]
+                bash_has_error = any(_has_error(tu.output) for tu in bash_tools if tu.output)
+                text_has_error = _has_error(candidate.text_content)
+                if has_fix_tool and not bash_has_error and not text_has_error:
                     fix_text = candidate.text_content
                     fix_index = candidate.index
                     break
@@ -481,24 +543,81 @@ class MemoryExtractor:
                     ))
         return memories
 
+    def _extract_learnings(
+        self,
+        messages: list[ParsedMessage],
+        session_id: str,
+        project_path: str,
+    ) -> list[Memory]:
+        """Extract learning/insight memories from messages."""
+        memories: list[Memory] = []
+        for msg in messages:
+            if not msg.text_content:
+                continue
+            # Choose patterns based on message role
+            if msg.msg_type == "assistant":
+                patterns = _LEARNING_PATTERNS_ASSISTANT
+            elif msg.role == "user":
+                patterns = _LEARNING_PATTERNS_USER
+            else:
+                continue
+            for pattern in patterns:
+                for match in pattern.finditer(msg.text_content):
+                    context = _sentence_around_match(msg.text_content, match)
+                    title = truncate(match.group(0))
+                    memories.append(Memory(
+                        session_id=session_id,
+                        project_path=project_path,
+                        memory_type=MemoryType.LEARNING,
+                        title=title,
+                        content=context,
+                        tags=self._auto_tags(context),
+                        source_line_start=msg.index,
+                        source_line_end=msg.index,
+                        confidence=0.65,
+                    ))
+        return memories
+
     # ----- deduplication --------------------------------------------------- #
 
     def _deduplicate(self, memories: list[Memory]) -> list[Memory]:
-        """Remove near-duplicate memories based on content hashing."""
-        seen: dict[str, Memory] = {}
+        """Remove near-duplicate memories based on content hashing and title similarity."""
+        seen_hash: dict[str, Memory] = {}
+        seen_title: dict[str, Memory] = {}
         unique: list[Memory] = []
         for mem in memories:
-            h = content_hash(mem.content)
-            if h in seen:
-                existing = seen[h]
+            # Normalize whitespace before hashing: strip + collapse spaces
+            normalized_content = " ".join(mem.content.strip().split())
+            h = content_hash(normalized_content)
+
+            # Primary dedup: content hash
+            if h in seen_hash:
+                existing = seen_hash[h]
                 # Keep the one with higher confidence
                 if mem.confidence > existing.confidence:
                     unique = [m for m in unique if m is not existing]
                     unique.append(mem)
-                    seen[h] = mem
-            else:
-                seen[h] = mem
-                unique.append(mem)
+                    seen_hash[h] = mem
+                    # Update title index too
+                    seen_title[mem.title.lower()] = mem
+                continue
+
+            # Secondary dedup: case-insensitive title comparison
+            title_key = mem.title.lower()
+            if title_key in seen_title:
+                existing = seen_title[title_key]
+                # Keep the one with higher confidence
+                if mem.confidence > existing.confidence:
+                    unique = [m for m in unique if m is not existing]
+                    unique.append(mem)
+                    seen_title[title_key] = mem
+                    # Also update hash index with the new memory's hash
+                    seen_hash[h] = mem
+                continue
+
+            seen_hash[h] = mem
+            seen_title[title_key] = mem
+            unique.append(mem)
         return unique
 
     # ----- auto tagging ---------------------------------------------------- #

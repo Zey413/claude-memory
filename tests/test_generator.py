@@ -3,8 +3,8 @@
 from datetime import datetime, timezone
 
 from claude_memory.db import MemoryDB
-from claude_memory.models import Memory, MemoryType, SessionSummary
 from claude_memory.generator import ClaudemdGenerator
+from claude_memory.models import Memory, MemoryType, SessionSummary
 from claude_memory.search import MemorySearch
 
 

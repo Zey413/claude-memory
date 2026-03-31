@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
-from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -44,7 +41,11 @@ def sample_jsonl(tmp_path):
                 "content": [
                     {
                         "type": "text",
-                        "text": "I'll create a REST API. Let's use FastAPI for this project because it's modern and fast.",
+                        "text": (
+                            "I'll create a REST API. Let's use"
+                            " FastAPI for this project because"
+                            " it's modern and fast."
+                        ),
                     },
                     {
                         "type": "tool_use",

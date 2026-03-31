@@ -1,6 +1,9 @@
 """Tests for the JSONL session parser."""
 
-from claude_memory.parser import parse_session_file, parse_line
+import json
+from pathlib import Path
+
+from claude_memory.parser import parse_line, parse_session_file
 
 
 def test_parse_session_file(sample_jsonl):
@@ -87,3 +90,131 @@ def test_parse_session_file_not_found(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         parse_session_file(tmp_path / "nonexistent.jsonl")
+
+
+# ── Expanded tests ────────────────────────────────────────────────────────────
+
+
+def test_empty_jsonl_file(tmp_path):
+    """Parsing an empty JSONL file returns an empty list."""
+    filepath = tmp_path / "empty.jsonl"
+    filepath.write_text("")
+    messages = parse_session_file(filepath)
+    assert messages == []
+
+
+def test_blank_lines_skipped(tmp_path):
+    """Blank lines and whitespace-only lines are skipped."""
+    filepath = tmp_path / "blanks.jsonl"
+    content = '\n\n{"type":"user","message":{"role":"user","content":"Hello"}}\n\n\n'
+    filepath.write_text(content)
+    messages = parse_session_file(filepath)
+    assert len(messages) == 1
+    assert messages[0].text_content == "Hello"
+
+
+def test_meta_messages_skipped_from_content(tmp_path):
+    """Messages with isMeta flag are parsed but flagged accordingly."""
+    filepath = tmp_path / "meta.jsonl"
+    lines = [
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "/clear"},
+            "isMeta": True,
+            "timestamp": "2026-03-28T10:00:00Z",
+        }),
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "/model claude-3"},
+            "isMeta": True,
+            "timestamp": "2026-03-28T10:00:05Z",
+        }),
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "Hello, real message"},
+            "isMeta": False,
+            "timestamp": "2026-03-28T10:00:10Z",
+        }),
+    ]
+    filepath.write_text("\n".join(lines))
+    messages = parse_session_file(filepath)
+
+    meta_msgs = [m for m in messages if m.is_meta]
+    non_meta = [m for m in messages if not m.is_meta]
+    assert len(meta_msgs) == 2
+    assert len(non_meta) == 1
+    assert non_meta[0].text_content == "Hello, real message"
+
+
+def test_various_timestamp_formats(tmp_path):
+    """Parse both ISO string and epoch millisecond timestamps."""
+    filepath = tmp_path / "timestamps.jsonl"
+    lines = [
+        # ISO format with Z
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "ISO timestamp"},
+            "timestamp": "2026-03-28T10:00:00Z",
+        }),
+        # Epoch milliseconds
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "Epoch timestamp"},
+            "timestamp": 1774965600000,  # approx 2026-03-28T10:00:00 UTC
+        }),
+        # No timestamp
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "No timestamp"},
+        }),
+    ]
+    filepath.write_text("\n".join(lines))
+    messages = parse_session_file(filepath)
+
+    assert len(messages) == 3
+    assert messages[0].timestamp is not None  # ISO parsed
+    assert messages[1].timestamp is not None  # Epoch parsed
+    assert messages[2].timestamp is None       # Missing
+
+
+def test_parse_queue_operation():
+    """Parse a queue-operation entry."""
+    data = {"type": "queue-operation", "operation": "enqueue"}
+    msg = parse_line(0, data)
+    assert msg is not None
+    assert msg.msg_type == "queue-operation"
+    assert msg.text_content == ""
+
+
+def test_parse_line_with_git_branch():
+    """Git branch info is captured from the data."""
+    data = {
+        "type": "user",
+        "message": {"role": "user", "content": "Fix bug"},
+        "timestamp": "2026-03-28T10:00:00Z",
+        "gitBranch": "feature/login",
+    }
+    msg = parse_line(0, data)
+    assert msg is not None
+    assert msg.git_branch == "feature/login"
+
+
+def test_parse_error_fix_session_fixture():
+    """Parse the error_fix_session.jsonl fixture file."""
+    fixture = Path(__file__).parent / "fixtures" / "error_fix_session.jsonl"
+    messages = parse_session_file(fixture)
+    assert len(messages) >= 8
+
+    # Should have both user and assistant messages
+    user_msgs = [m for m in messages if m.role == "user"]
+    asst_msgs = [m for m in messages if m.role == "assistant"]
+    assert len(user_msgs) >= 3
+    assert len(asst_msgs) >= 4
+
+    # Should have tool uses
+    all_tools = []
+    for msg in messages:
+        all_tools.extend(msg.tool_uses)
+    tool_names = [t.name for t in all_tools]
+    assert "Bash" in tool_names
+    assert "Edit" in tool_names

@@ -26,6 +26,9 @@ KNOWN_MSG_TYPES = frozenset({
     "queue-operation",
 })
 
+# Maximum line size to process (10 MB) — skip oversized lines
+_MAX_LINE_BYTES = 10 * 1024 * 1024
+
 
 @dataclass
 class ToolUse:
@@ -132,8 +135,10 @@ def _attach_tool_results(messages: list[ParsedMessage]) -> None:
     an index of tool_use_id → ToolUse from assistant messages, then scan user
     messages for result blocks.
     """
+    if not messages:
+        return
+
     # Build id → ToolUse index from assistant messages
-    tool_index: dict[str, ToolUse] = {}
     for msg in messages:
         if msg.msg_type != "assistant":
             continue
@@ -149,9 +154,14 @@ def _attach_tool_results(messages: list[ParsedMessage]) -> None:
         msg = messages[i]
         if msg.msg_type == "assistant" and msg.tool_uses:
             # Look ahead for the matching result message
-            for j in range(i + 1, min(i + 3, len(messages))):
+            lookahead_end = min(i + 3, len(messages))
+            for j in range(i + 1, lookahead_end):
                 candidate = messages[j]
-                if candidate.msg_type == "user" and candidate.text_content == "" and not candidate.tool_uses:
+                if (
+                    candidate.msg_type == "user"
+                    and candidate.text_content == ""
+                    and not candidate.tool_uses
+                ):
                     # This is likely a tool-result-only user message — its
                     # text was already extracted (empty because tool_result
                     # blocks are not plain text).  We skip detailed matching
@@ -217,14 +227,14 @@ def parse_line(index: int, data: dict) -> ParsedMessage | None:
     if isinstance(raw_ts, str):
         try:
             ts = parse_iso(raw_ts)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError, OverflowError, AttributeError):
+            logger.debug("Malformed timestamp string on line %d: %r", index, raw_ts)
     elif isinstance(raw_ts, (int, float)):
         try:
             # Epoch milliseconds (Claude Code convention)
             ts = datetime.fromtimestamp(raw_ts / 1000)
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError, OverflowError):
+            logger.debug("Malformed epoch timestamp on line %d: %r", index, raw_ts)
 
     # Meta commands (e.g. /clear, /model)
     is_meta = bool(data.get("isMeta", False))
@@ -250,7 +260,8 @@ def parse_line(index: int, data: dict) -> ParsedMessage | None:
 def parse_session_file(filepath: Path) -> list[ParsedMessage]:
     """Parse an entire session JSONL file into a list of :class:`ParsedMessage`.
 
-    Skips blank lines and malformed JSON with a warning.
+    Skips blank lines, malformed JSON, and oversized lines (> 10 MB).
+    Tries utf-8-sig first, falls back to latin-1 on encoding errors.
     """
     filepath = Path(filepath)
     if not filepath.exists():
@@ -258,10 +269,33 @@ def parse_session_file(filepath: Path) -> list[ParsedMessage]:
 
     messages: list[ParsedMessage] = []
 
-    with filepath.open("r", encoding="utf-8") as fh:
+    # Try encodings in order: utf-8-sig handles BOM, latin-1 never fails
+    encodings = ["utf-8-sig", "latin-1"]
+    fh = None
+    for enc in encodings:
+        try:
+            fh = filepath.open("r", encoding=enc, errors="replace")
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            logger.debug("Failed to open %s with encoding %s, trying next", filepath, enc)
+            continue
+
+    if fh is None:
+        logger.error("Could not open %s with any supported encoding", filepath)
+        return messages
+
+    try:
         for line_no, raw_line in enumerate(fh):
             raw_line = raw_line.strip()
             if not raw_line:
+                continue
+
+            # Skip oversized lines (> 10 MB)
+            if len(raw_line.encode("utf-8", errors="replace")) > _MAX_LINE_BYTES:
+                logger.warning(
+                    "Skipping oversized line %d in %s (> %d bytes)",
+                    line_no, filepath, _MAX_LINE_BYTES,
+                )
                 continue
 
             try:
@@ -277,6 +311,8 @@ def parse_session_file(filepath: Path) -> list[ParsedMessage]:
             parsed = parse_line(line_no, data)
             if parsed is not None:
                 messages.append(parsed)
+    finally:
+        fh.close()
 
     # Post-processing: try to attach tool results
     _attach_tool_results(messages)

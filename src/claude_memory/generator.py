@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +13,8 @@ from claude_memory.db import MemoryDB
 from claude_memory.models import Memory, MemoryType, ProjectContext
 from claude_memory.search import MemorySearch
 from claude_memory.utils import format_duration, project_name_from_path
+
+logger = logging.getLogger(__name__)
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────
@@ -53,6 +58,56 @@ class ClaudemdGenerator:
         self.db = db
         self.search = search
 
+    # ── Internal file helper ────────────────────────────────────────────
+
+    @staticmethod
+    def _atomic_write(dest: Path, content: str) -> None:
+        """Write content to *dest* atomically via a temp file + os.replace().
+
+        Creates parent directories with exist_ok=True.  Raises readable
+        errors on PermissionError and OSError.
+        """
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            raise PermissionError(
+                f"Cannot create directory {dest.parent}: permission denied"
+            )
+        except OSError as exc:
+            raise OSError(f"Cannot create directory {dest.parent}: {exc}") from exc
+
+        # Write to a temp file in the same directory, then atomically replace
+        fd = None
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                suffix=".tmp", dir=str(dest.parent), prefix=".claude_mem_"
+            )
+            os.write(fd, content.encode("utf-8"))
+            os.close(fd)
+            fd = None  # Mark as closed
+            os.replace(tmp_path, str(dest))
+            tmp_path = None  # Mark as consumed
+        except PermissionError:
+            raise PermissionError(
+                f"Cannot write to {dest}: permission denied"
+            )
+        except OSError as exc:
+            raise OSError(f"Failed to write {dest}: {exc}") from exc
+        finally:
+            # Clean up fd if still open
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            # Clean up temp file if replace didn't happen
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
     # ── Public API ───────────────────────────────────────────────────────
 
     def generate_project_context(self, project_path: str) -> str:
@@ -70,16 +125,32 @@ class ClaudemdGenerator:
         )
 
         # 1. Key Decisions
-        decisions = self.search.by_type(project_path, MemoryType.DECISION, limit=_MAX_ITEMS_PER_SECTION)
-        sections.append(_section("Key Decisions", [_memory_one_liner(m) for m in decisions]))
+        limit = _MAX_ITEMS_PER_SECTION
+        decisions = self.search.by_type(
+            project_path, MemoryType.DECISION, limit=limit,
+        )
+        sections.append(_section(
+            "Key Decisions",
+            [_memory_one_liner(m) for m in decisions],
+        ))
 
         # 2. Active TODOs
-        todos = self.search.by_type(project_path, MemoryType.TODO, limit=_MAX_ITEMS_PER_SECTION)
-        sections.append(_section("Active TODOs", [_memory_one_liner(m) for m in todos]))
+        todos = self.search.by_type(
+            project_path, MemoryType.TODO, limit=limit,
+        )
+        sections.append(_section(
+            "Active TODOs",
+            [_memory_one_liner(m) for m in todos],
+        ))
 
         # 3. Code Patterns & Conventions
-        patterns = self.search.by_type(project_path, MemoryType.PATTERN, limit=_MAX_ITEMS_PER_SECTION)
-        sections.append(_section("Code Patterns & Conventions", [_memory_one_liner(m) for m in patterns]))
+        patterns = self.search.by_type(
+            project_path, MemoryType.PATTERN, limit=limit,
+        )
+        sections.append(_section(
+            "Code Patterns & Conventions",
+            [_memory_one_liner(m) for m in patterns],
+        ))
 
         # 4. Recent Sessions (last 5 summaries)
         recent_sessions = self.db.get_recent_sessions(project_path=project_path, limit=5)
@@ -87,7 +158,10 @@ class ClaudemdGenerator:
         for sess in recent_sessions:
             date_str = sess.started_at.strftime("%Y-%m-%d")
             duration_str = format_duration(sess.duration_minutes) if sess.duration_minutes else "?"
-            summary = sess.summary_text.replace("\n", " ").strip() if sess.summary_text else "No summary"
+            summary = (
+                sess.summary_text.replace("\n", " ").strip()
+                if sess.summary_text else "No summary"
+            )
             if len(summary) > 120:
                 summary = summary[:117] + "..."
             branch_info = f" (`{sess.git_branch}`)" if sess.git_branch else ""
@@ -95,12 +169,21 @@ class ClaudemdGenerator:
         sections.append(_section("Recent Sessions", session_lines))
 
         # 5. User Preferences
-        preferences = self.search.by_type(project_path, MemoryType.PREFERENCE, limit=_MAX_ITEMS_PER_SECTION)
-        sections.append(_section("User Preferences", [_memory_one_liner(m) for m in preferences]))
+        preferences = self.search.by_type(
+            project_path, MemoryType.PREFERENCE, limit=limit,
+        )
+        sections.append(_section(
+            "User Preferences",
+            [_memory_one_liner(m) for m in preferences],
+        ))
 
         # 6. Known Issues & Solutions
-        issues = self.search.by_type(project_path, MemoryType.ISSUE, limit=_MAX_ITEMS_PER_SECTION)
-        solutions = self.search.by_type(project_path, MemoryType.SOLUTION, limit=_MAX_ITEMS_PER_SECTION)
+        issues = self.search.by_type(
+            project_path, MemoryType.ISSUE, limit=limit,
+        )
+        solutions = self.search.by_type(
+            project_path, MemoryType.SOLUTION, limit=limit,
+        )
         issue_lines: list[str] = []
         for m in issues:
             issue_lines.append(f"🐛 {_memory_one_liner(m)}")
@@ -118,12 +201,23 @@ class ClaudemdGenerator:
         total_sessions = self.db.count_sessions(project_path=project_path)
         total_memories = self.db.count_memories(project_path=project_path)
 
-        recent_sessions = self.db.get_recent_sessions(project_path=project_path, limit=1)
-        last_session_at = recent_sessions[0].started_at if recent_sessions else None
+        limit = _MAX_ITEMS_PER_SECTION
+        recent_sessions = self.db.get_recent_sessions(
+            project_path=project_path, limit=1,
+        )
+        last_session_at = (
+            recent_sessions[0].started_at if recent_sessions else None
+        )
 
-        decisions = self.search.by_type(project_path, MemoryType.DECISION, limit=_MAX_ITEMS_PER_SECTION)
-        todos = self.search.by_type(project_path, MemoryType.TODO, limit=_MAX_ITEMS_PER_SECTION)
-        patterns = self.search.by_type(project_path, MemoryType.PATTERN, limit=_MAX_ITEMS_PER_SECTION)
+        decisions = self.search.by_type(
+            project_path, MemoryType.DECISION, limit=limit,
+        )
+        todos = self.search.by_type(
+            project_path, MemoryType.TODO, limit=limit,
+        )
+        patterns = self.search.by_type(
+            project_path, MemoryType.PATTERN, limit=limit,
+        )
 
         return ProjectContext(
             project_path=project_path,
@@ -140,18 +234,16 @@ class ClaudemdGenerator:
         """Write context to ``~/.claude/projects/<PATH>/memory/context.md``."""
         claude_dir = project_path_to_claude_dir(project_path, config)
         memory_dir = claude_dir / "memory"
-        memory_dir.mkdir(parents=True, exist_ok=True)
         dest = memory_dir / "context.md"
         content = self.generate_project_context(project_path)
-        dest.write_text(content, encoding="utf-8")
+        self._atomic_write(dest, content)
         return dest
 
     def write_to_project_root(self, project_path: str) -> Path:
         """Write context to ``<project>/CLAUDE.md``."""
         dest = Path(project_path) / "CLAUDE.md"
-        dest.parent.mkdir(parents=True, exist_ok=True)
         content = self.generate_project_context(project_path)
-        dest.write_text(content, encoding="utf-8")
+        self._atomic_write(dest, content)
         return dest
 
     def render_to_string(self, project_path: str) -> str:
